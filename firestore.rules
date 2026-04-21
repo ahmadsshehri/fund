@@ -1,0 +1,73 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper functions
+    function isAuth() { return request.auth != null; }
+    function getUserData() { return get(/databases/$(database)/documents/users/$(request.auth.uid)).data; }
+    function isManager() { return isAuth() && getUserData().role == 'manager'; }
+    function isAdmin() { return isAuth() && getUserData().role in ['manager', 'admin']; }
+    function isInvestor(investorId) {
+      return isAuth() && getUserData().role == 'investor' && getUserData().investorId == investorId;
+    }
+    
+    // Users collection
+    match /users/{userId} {
+      allow read: if isAuth() && (request.auth.uid == userId || isManager());
+      allow create: if isManager();
+      allow update: if isManager() || request.auth.uid == userId;
+      allow delete: if isManager();
+    }
+    
+    // Investors collection
+    match /investors/{investorId} {
+      allow read: if isAdmin() || isInvestor(investorId);
+      allow write: if isAdmin();
+    }
+    
+    // Investor history
+    match /investorHistory/{docId} {
+      allow read: if isAdmin() || (isAuth() && getUserData().investorId == resource.data.investorId);
+      allow write: if isAdmin();
+    }
+    
+    // Investments
+    match /investments/{docId} {
+      allow read: if isAdmin();
+      allow write: if isAdmin();
+    }
+    
+    // Expenses
+    match /expenses/{docId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if isManager();
+    }
+    
+    // Distributions
+    match /distributions/{docId} {
+      allow read: if isAdmin() || (isAuth() && (resource.data.investorId == getUserData().investorId || resource.data.details[getUserData().investorId] != null));
+      allow create: if isAdmin();
+      allow update: if isManager();
+    }
+    
+    // Cash flows (read-only except system writes via admin SDK)
+    match /cashFlows/{docId} {
+      allow read: if isAdmin();
+      allow write: if isAdmin();
+    }
+    
+    // Activity logs (read by manager, write by any authenticated)
+    match /activityLogs/{docId} {
+      allow read: if isManager();
+      allow create: if isAuth();
+    }
+    
+    // Fund snapshots
+    match /fundSnapshots/{docId} {
+      allow read: if isAdmin();
+      allow write: if isManager();
+    }
+  }
+}
