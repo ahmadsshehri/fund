@@ -47,8 +47,8 @@ export default function LoginPage() {
           }}>
             <Building2 size={34} color="#0f1729" strokeWidth={2} />
           </div>
-          <h1 style={{ fontSize: '1.5rem', fontWeight: 800, color: '#fff', marginBottom: '0.25rem' }}>نظام الصندوق</h1>
-          <p style={{ fontSize: '0.8rem', color: 'rgba(255,255,255,.45)' }}>الصندوق العائلي والتجاري الخاص</p>
+          <h1 style={{ fontSize: '1.5rem', fontWeight: 800, color: '#fff', marginBottom: '0.25rem' }}>صندوق ال سعد</h1>
+          <p style={{ fontSize: '0.8rem', color: 'rgba(255,255,255,.45)' }}>الصندوق العائلي التجاري الخاص</p>
         </div>
 
         {/* Card */}
