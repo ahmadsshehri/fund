@@ -1,81 +1,39 @@
 'use client';
-
 export const dynamic = 'force-dynamic';
 
 import { useEffect, useState } from 'react';
-import { collection, getDocs, query, orderBy, Timestamp } from 'firebase/firestore';
+import { collection, getDocs, Timestamp } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { formatCurrency, formatNumber } from '@/lib/utils';
 import {
   Wallet, TrendingUp, Users, Activity, CheckCircle, XCircle,
-  DollarSign, ArrowUpRight, ArrowDownRight, RefreshCw, Info,
-  AlertTriangle, BarChart3,
+  DollarSign, ArrowUpRight, RefreshCw, AlertTriangle, Info,
+  BarChart3, ArrowDownRight, ChevronLeft,
 } from 'lucide-react';
-
-// ─── Types ─────────────────────────────────────────────────────────────────
-interface Investor { totalPaid: number; shareCount: number; status: string; userId?: string; }
-interface Investment { entryAmount: number; currentValue: number; status: string; totalProfit: number; closingAmount?: number; name: string; closingDate?: Date; dividends?: { amount: number }[]; }
-interface Expense { amount: number; status: string; }
-interface Distribution { totalAmount: number; status: string; affectsCash: boolean; }
+import Link from 'next/link';
 
 const toDate = (v: unknown): Date =>
   v instanceof Timestamp ? v.toDate() : v instanceof Date ? v : new Date(v as string);
 
-// ─── Cash Calculation ────────────────────────────────────────────────────────
-// الكاش الصحيح = رأس المال الداخل - المستثمر في صفقات قائمة - المصاريف + عوائد الصفقات المغلقة + الأرباح الموزعة - التوزيعات للمستثمرين
-function calcCash(
-  investors: Investor[],
-  investments: Investment[],
-  expenses: Expense[],
-  distributions: Distribution[],
-): number {
-  // ➕ رأس المال الكلي الداخل من المستثمرين
-  const capitalIn = investors.reduce((s, i) => s + (i.totalPaid || 0), 0);
+interface Investor { totalPaid: number; shareCount: number; status: string; userId?: string; }
+interface Investment { entryAmount: number; currentValue: number; status: string; closingAmount?: number; name: string; closingDate?: Date; dividends?: { amount: number }[]; }
+interface Expense { amount: number; status: string; }
+interface Distribution { totalAmount: number; status: string; affectsCash: boolean; }
 
-  // ➖ المبالغ المستثمرة في صفقات قائمة حالياً (خرجت من الكاش)
-  const investedInActive = investments
-    .filter(i => i.status === 'active')
-    .reduce((s, i) => s + (i.entryAmount || 0), 0);
-
-  // ➕ عوائد الصفقات المغلقة (مبلغ الإغلاق المستلم)
-  const closingReturns = investments
-    .filter(i => i.status === 'closed')
-    .reduce((s, i) => s + (i.closingAmount || 0), 0);
-
-  // ➖ رأس مال الصفقات المغلقة (كان قد خرج من الكاش)
-  const closedEntries = investments
-    .filter(i => i.status === 'closed')
-    .reduce((s, i) => s + (i.entryAmount || 0), 0);
-
-  // ➕ أرباح موزعة مستلمة من الاستثمارات (دخلت الكاش)
-  const dividendsReceived = investments
-    .reduce((s, i) => s + (i.dividends || []).reduce((ss, d) => ss + d.amount, 0), 0);
-
-  // ➖ المصاريف المعتمدة
-  const expensesOut = expenses
-    .filter(e => e.status === 'approved')
-    .reduce((s, e) => s + (e.amount || 0), 0);
-
-  // ➖ التوزيعات المعتمدة التي تؤثر على الكاش
-  const distributionsOut = distributions
-    .filter(d => d.status === 'approved' && d.affectsCash)
-    .reduce((s, d) => s + (d.totalAmount || 0), 0);
-
-  return capitalIn
-    - investedInActive
-    + closingReturns
-    - closedEntries
-    + dividendsReceived
-    - expensesOut
-    - distributionsOut;
+function calcCash(inv: Investor[], invst: Investment[], exp: Expense[], dist: Distribution[]) {
+  const capitalIn   = inv.reduce((s, i) => s + (i.totalPaid || 0), 0);
+  const activeOut   = invst.filter(i => i.status === 'active').reduce((s, i) => s + i.entryAmount, 0);
+  const closedIn    = invst.filter(i => i.status === 'closed').reduce((s, i) => s + (i.closingAmount || 0), 0);
+  const closedOut   = invst.filter(i => i.status === 'closed').reduce((s, i) => s + i.entryAmount, 0);
+  const divs        = invst.reduce((s, i) => s + (i.dividends || []).reduce((ss, d) => ss + d.amount, 0), 0);
+  const expOut      = exp.filter(e => e.status === 'approved').reduce((s, e) => s + e.amount, 0);
+  const distOut     = dist.filter(d => d.status === 'approved' && d.affectsCash).reduce((s, d) => s + d.totalAmount, 0);
+  return capitalIn - activeOut + closedIn - closedOut + divs - expOut - distOut;
 }
 
 export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [lastUpdated, setLastUpdated] = useState(new Date());
-
-  // Stats
   const [investors, setInvestors] = useState<Investor[]>([]);
   const [investments, setInvestments] = useState<Investment[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
@@ -84,220 +42,174 @@ export default function DashboardPage() {
   const load = async () => {
     setLoading(true); setError('');
     try {
-      const [invSnap, invstSnap, expSnap, distSnap] = await Promise.all([
+      const [a, b, c, d] = await Promise.all([
         getDocs(collection(db, 'investors')),
         getDocs(collection(db, 'investments')),
         getDocs(collection(db, 'expenses')),
         getDocs(collection(db, 'distributions')),
       ]);
-
-      setInvestors(invSnap.docs.map(d => d.data() as Investor));
-      setInvestments(invstSnap.docs.map(d => {
-        const v = d.data();
-        return {
-          ...v,
-          closingDate: v.closingDate ? toDate(v.closingDate) : undefined,
-          dividends: v.dividends || [],
-        } as Investment;
-      }));
-      setExpenses(expSnap.docs.map(d => d.data() as Expense));
-      setDistributions(distSnap.docs.map(d => d.data() as Distribution));
-      setLastUpdated(new Date());
-    } catch (e) {
-      console.error(e);
-      setError(String(e));
-    } finally {
-      setLoading(false);
-    }
+      setInvestors(a.docs.map(d => d.data() as Investor));
+      setInvestments(b.docs.map(d => ({ ...d.data(), dividends: d.data().dividends || [], closingDate: d.data().closingDate ? toDate(d.data().closingDate) : undefined } as Investment)));
+      setExpenses(c.docs.map(d => d.data() as Expense));
+      setDistributions(d.docs.map(d => d.data() as Distribution));
+    } catch(e) { setError(String(e)); }
+    finally { setLoading(false); }
   };
 
   useEffect(() => { load(); }, []);
 
-  // ─── Derived metrics ───────────────────────────────────────────────────────
-  const availableCash = calcCash(investors, investments, expenses, distributions);
+  const cash = calcCash(investors, investments, expenses, distributions);
+  const activeInvs    = investments.filter(i => i.status === 'active');
+  const closedInvs    = investments.filter(i => i.status === 'closed');
+  const distressInvs  = investments.filter(i => i.status === 'distressed');
+  const totalCapital  = investors.reduce((s, i) => s + (i.totalPaid || 0), 0);
+  const totalShares   = investors.reduce((s, i) => s + (i.shareCount || 0), 0);
+  const sharePrice    = totalShares > 0 ? totalCapital / totalShares : 0;
+  const totalCurrentV = activeInvs.reduce((s, i) => s + i.currentValue, 0);
+  const totalDivs     = investments.reduce((s, i) => s + (i.dividends||[]).reduce((ss,d)=>ss+d.amount,0), 0);
+  const totalExp      = expenses.filter(e => e.status==='approved').reduce((s,e)=>s+e.amount,0);
+  const unrealized    = totalCurrentV - activeInvs.reduce((s,i)=>s+i.entryAmount,0);
+  const noAccount     = investors.filter(i => !i.userId).length;
+  const soon          = new Date(Date.now() + 30*86400000);
+  const closingSoon   = activeInvs.filter(i => i.closingDate && i.closingDate <= soon);
 
-  const activeInvs   = investments.filter(i => i.status === 'active');
-  const closedInvs   = investments.filter(i => i.status === 'closed');
-  const distressInvs = investments.filter(i => i.status === 'distressed');
-
-  const totalCapital     = investors.reduce((s, i) => s + (i.totalPaid || 0), 0);
-  const totalShares      = investors.reduce((s, i) => s + (i.shareCount || 0), 0);
-  const sharePrice       = totalShares > 0 ? totalCapital / totalShares : 0;
-
-  const totalInvested    = activeInvs.reduce((s, i) => s + i.entryAmount, 0);
-  const totalCurrentVal  = activeInvs.reduce((s, i) => s + i.currentValue, 0);
-  const unrealizedProfit = totalCurrentVal - totalInvested;
-
-  const totalDividends   = investments.reduce((s, i) => s + (i.dividends || []).reduce((ss, d) => ss + d.amount, 0), 0);
-
-  const realizedProfit   = closedInvs.reduce((s, i) => {
-    const capGain = (i.closingAmount || 0) - i.entryAmount;
-    const divs = (i.dividends || []).reduce((ss, d) => ss + d.amount, 0);
-    return s + capGain + divs;
-  }, 0) + activeInvs.reduce((s, i) => s + (i.dividends || []).reduce((ss, d) => ss + d.amount, 0), 0);
-
-  const totalExpenses    = expenses.filter(e => e.status === 'approved').reduce((s, e) => s + e.amount, 0);
-  const totalDistributions = distributions.filter(d => d.status === 'approved' && d.affectsCash).reduce((s, d) => s + d.totalAmount, 0);
-
-  // Alerts
-  const alerts: { type: 'danger' | 'warning' | 'info'; msg: string }[] = [];
-  if (distressInvs.length > 0) alerts.push({ type: 'danger', msg: `${distressInvs.length} استثمار متعثر يحتاج مراجعة` });
-  if (availableCash < 0) alerts.push({ type: 'warning', msg: `الكاش سالب — تحقق من بيانات رأس المال والاستثمارات` });
-  const soon = new Date(Date.now() + 30 * 86400000);
-  investments.filter(i => i.status === 'active' && i.closingDate && toDate(i.closingDate) <= soon)
-    .forEach(i => alerts.push({ type: 'warning', msg: `استثمار يقترب موعد إغلاقه: ${i.name}` }));
-  const noAccount = investors.filter(i => !i.userId).length;
-  if (noAccount > 0) alerts.push({ type: 'info', msg: `${noAccount} مستثمر بدون حساب دخول` });
+  const alerts = [
+    ...distressInvs.map(i => ({ type: 'danger' as const, msg: `استثمار متعثر: ${i.name}` })),
+    ...closingSoon.map(i => ({ type: 'warning' as const, msg: `يقترب موعد إغلاق: ${i.name}` })),
+    ...(noAccount > 0 ? [{ type: 'info' as const, msg: `${noAccount} مستثمر بدون حساب` }] : []),
+  ];
 
   if (loading) return (
-    <div className="flex items-center justify-center h-64">
-      <div className="text-center">
-        <div className="w-10 h-10 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-        <p className="text-slate-500 text-sm">جاري تحميل البيانات...</p>
-      </div>
-    </div>
-  );
-
-  if (error) return (
-    <div className="text-center py-20">
-      <div className="bg-red-50 border border-red-200 rounded-xl p-6 max-w-lg mx-auto">
-        <XCircle size={40} className="text-red-500 mx-auto mb-3" />
-        <p className="text-red-700 font-semibold mb-2">خطأ في تحميل البيانات</p>
-        <p className="text-red-600 text-sm font-mono bg-red-100 p-2 rounded text-left">{error}</p>
-        <button onClick={load} className="mt-4 btn-primary mx-auto"><RefreshCw size={16} />إعادة المحاولة</button>
+    <div style={{ display:'flex', alignItems:'center', justifyContent:'center', height:'60vh' }}>
+      <div style={{ textAlign:'center' }}>
+        <div style={{ width:40,height:40,border:'3px solid #e2e8f0',borderTopColor:'var(--navy)',borderRadius:'50%',margin:'0 auto 12px',animation:'spin 0.7s linear infinite' }} />
+        <p style={{ color:'var(--muted)',fontSize:'0.85rem' }}>جاري التحميل...</p>
       </div>
     </div>
   );
 
   return (
-    <div className="space-y-6">
+    <div style={{ display:'flex',flexDirection:'column',gap:'1.25rem' }}>
       {/* Header */}
       <div className="page-header">
         <div>
           <h1 className="page-title">لوحة التحكم</h1>
-          <p className="text-slate-500 text-sm mt-0.5">آخر تحديث: {lastUpdated.toLocaleTimeString('ar-SA')}</p>
+          <p className="page-subtitle">{new Date().toLocaleDateString('ar-SA',{weekday:'long',year:'numeric',month:'long',day:'numeric'})}</p>
         </div>
-        <button onClick={load} className="btn-secondary"><RefreshCw size={16} />تحديث</button>
+        <button onClick={load} className="btn-secondary" style={{padding:'0.5rem 0.75rem'}}>
+          <RefreshCw size={15} />
+        </button>
       </div>
 
       {/* Alerts */}
-      {alerts.length > 0 && (
-        <div className="space-y-2">
-          {alerts.map((a, i) => (
-            <div key={i} className={`alert-${a.type} text-sm`}>
-              {a.type === 'danger' ? <XCircle size={16} className="shrink-0" />
-                : a.type === 'warning' ? <AlertTriangle size={16} className="shrink-0" />
-                : <Info size={16} className="shrink-0" />}
-              <span>{a.msg}</span>
-            </div>
-          ))}
+      {alerts.map((a,i) => (
+        <div key={i} className={`alert-${a.type}`} style={{fontSize:'0.85rem'}}>
+          {a.type==='danger'?<XCircle size={16}/>:a.type==='warning'?<AlertTriangle size={16}/>:<Info size={16}/>}
+          <span>{a.msg}</span>
         </div>
-      )}
+      ))}
 
-      {/* Cash Banner */}
-      <div className={`rounded-2xl p-6 text-white shadow-lg ${availableCash >= 0 ? 'bg-gradient-to-l from-green-600 to-emerald-700' : 'bg-gradient-to-l from-red-600 to-red-700'}`}>
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-          <div>
-            <div className="flex items-center gap-2 mb-2">
-              <Wallet size={20} className="opacity-80" />
-              <span className="opacity-80 text-sm font-medium">الكاش المتوفر الآن</span>
-            </div>
-            <p className="text-4xl font-bold">{formatCurrency(availableCash)}</p>
-            <p className="text-xs opacity-60 mt-1">
-              رأس المال {formatCurrency(totalCapital)} — مستثمر {formatCurrency(totalInvested)} — مصاريف {formatCurrency(totalExpenses)}
-            </p>
+      {/* CASH HERO CARD */}
+      <div style={{
+        borderRadius:'20px', padding:'1.5rem',
+        background: cash>=0 ? 'linear-gradient(135deg,#059669,#10b981)' : 'linear-gradient(135deg,#dc2626,#ef4444)',
+        color:'#fff', boxShadow: cash>=0 ? '0 8px 32px rgba(5,150,105,.35)' : '0 8px 32px rgba(220,38,38,.35)',
+        position:'relative', overflow:'hidden',
+      }}>
+        <div style={{ position:'absolute',top:'-30%',left:'-10%',width:'200px',height:'200px',borderRadius:'50%',background:'rgba(255,255,255,.08)',pointerEvents:'none' }} />
+        <div style={{ position:'absolute',bottom:'-20%',right:'5%',width:'150px',height:'150px',borderRadius:'50%',background:'rgba(255,255,255,.06)',pointerEvents:'none' }} />
+        <div style={{ position:'relative',zIndex:1 }}>
+          <div style={{ display:'flex',alignItems:'center',gap:'8px',marginBottom:'0.5rem',opacity:.8 }}>
+            <Wallet size={16} />
+            <span style={{ fontSize:'0.8rem',fontWeight:600 }}>الكاش المتوفر الآن</span>
           </div>
-          <div className="grid grid-cols-3 gap-6">
-            <div className="text-center">
-              <p className="opacity-70 text-xs mb-1">إجمالي رأس المال</p>
-              <p className="text-xl font-bold">{formatCurrency(totalCapital)}</p>
-            </div>
-            <div className="text-center">
-              <p className="opacity-70 text-xs mb-1">سعر الحصة</p>
-              <p className="text-xl font-bold">{formatCurrency(sharePrice)}</p>
-            </div>
-            <div className="text-center">
-              <p className="opacity-70 text-xs mb-1">إجمالي الحصص</p>
-              <p className="text-xl font-bold">{formatNumber(totalShares, 0)}</p>
-            </div>
+          <p style={{ fontSize:'2.25rem',fontWeight:900,lineHeight:1,marginBottom:'1.25rem' }}>{formatCurrency(cash)}</p>
+          <div style={{ display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'1rem' }}>
+            {[
+              ['رأس المال',formatCurrency(totalCapital)],
+              ['سعر الحصة',formatCurrency(sharePrice)],
+              ['إجمالي الحصص',formatNumber(totalShares,0)],
+            ].map(([k,v])=>(
+              <div key={k}>
+                <p style={{ fontSize:'0.68rem',opacity:.7,marginBottom:'2px' }}>{k}</p>
+                <p style={{ fontSize:'0.9rem',fontWeight:700 }}>{v}</p>
+              </div>
+            ))}
           </div>
         </div>
       </div>
 
-      {/* Main stats */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+      {/* Quick stats — 2x2 on mobile */}
+      <div style={{ display:'grid',gridTemplateColumns:'repeat(2,1fr)',gap:'0.875rem' }}>
         {[
-          { label: 'إجمالي رأس المال', value: formatCurrency(totalCapital), icon: <DollarSign size={20} />, color: 'bg-blue-50 text-blue-600' },
-          { label: 'عدد المستثمرين', value: String(investors.length), icon: <Users size={20} />, color: 'bg-purple-50 text-purple-600' },
-          { label: 'استثمارات قائمة', value: String(activeInvs.length), icon: <Activity size={20} />, color: 'bg-green-50 text-green-600' },
-          { label: 'استثمارات مغلقة', value: String(closedInvs.length), icon: <CheckCircle size={20} />, color: 'bg-blue-50 text-blue-600' },
-          { label: 'استثمارات متعثرة', value: String(distressInvs.length), icon: <XCircle size={20} />, color: 'bg-red-50 text-red-600' },
-          { label: 'أرباح موزعة مستلمة', value: formatCurrency(totalDividends), icon: <ArrowUpRight size={20} />, color: 'bg-orange-50 text-orange-600' },
-          { label: 'أرباح تراكمية (غير محققة)', value: formatCurrency(unrealizedProfit), icon: <TrendingUp size={20} />, color: 'bg-yellow-50 text-yellow-600' },
-          { label: 'إجمالي الأرباح المحققة', value: formatCurrency(realizedProfit), icon: <BarChart3 size={20} />, color: 'bg-emerald-50 text-emerald-600' },
-          { label: 'إجمالي المصاريف', value: formatCurrency(totalExpenses), icon: <ArrowDownRight size={20} />, color: 'bg-red-50 text-red-600' },
-          { label: 'التوزيعات للمستثمرين', value: formatCurrency(totalDistributions), icon: <ArrowDownRight size={20} />, color: 'bg-orange-50 text-orange-600' },
-        ].map(card => (
+          { label:'رأس المال', value:formatCurrency(totalCapital), icon:<DollarSign size={20}/>, accent:'#2563eb', bg:'#eff6ff' },
+          { label:'المستثمرون', value:String(investors.length), icon:<Users size={20}/>, accent:'#7c3aed', bg:'#f5f3ff' },
+          { label:'استثمارات قائمة', value:String(activeInvs.length), icon:<Activity size={20}/>, accent:'#059669', bg:'#f0fdf4' },
+          { label:'مغلقة', value:String(closedInvs.length), icon:<CheckCircle size={20}/>, accent:'#0284c7', bg:'#f0f9ff' },
+          { label:'متعثرة', value:String(distressInvs.length), icon:<XCircle size={20}/>, accent:'#dc2626', bg:'#fef2f2' },
+          { label:'أرباح موزعة', value:formatCurrency(totalDivs), icon:<ArrowUpRight size={20}/>, accent:'#d97706', bg:'#fffbeb' },
+          { label:'ربح تراكمي', value:formatCurrency(unrealized), icon:<TrendingUp size={20}/>, accent:'#0891b2', bg:'#ecfeff' },
+          { label:'المصاريف', value:formatCurrency(totalExp), icon:<ArrowDownRight size={20}/>, accent:'#dc2626', bg:'#fef2f2' },
+        ].map(card=>(
           <div key={card.label} className="stat-card">
-            <div className={`p-2.5 rounded-xl w-fit mb-3 ${card.color}`}>{card.icon}</div>
-            <p className="text-xl font-bold text-slate-800 mb-0.5">{card.value}</p>
-            <p className="text-xs text-slate-500">{card.label}</p>
+            <div style={{ width:40,height:40,borderRadius:12,background:card.bg,display:'flex',alignItems:'center',justifyContent:'center',color:card.accent,marginBottom:'0.75rem' }}>
+              {card.icon}
+            </div>
+            <p style={{ fontSize:'1.125rem',fontWeight:800,color:'var(--navy)',lineHeight:1.1 }}>{card.value}</p>
+            <p style={{ fontSize:'0.72rem',color:'var(--muted)',marginTop:'3px' }}>{card.label}</p>
           </div>
         ))}
       </div>
 
-      {/* Two column summary */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {/* Cash breakdown */}
-        <div className="card p-6">
-          <h3 className="section-title">تفصيل حساب الكاش</h3>
-          <div className="space-y-3">
-            {[
-              { label: 'رأس المال الداخل من المستثمرين', value: totalCapital, positive: true },
-              { label: 'مبالغ الاستثمارات القائمة (خارج)', value: -activeInvs.reduce((s, i) => s + i.entryAmount, 0), positive: false },
-              { label: 'عوائد الصفقات المغلقة (داخل)', value: closedInvs.reduce((s, i) => s + (i.closingAmount || 0), 0), positive: true },
-              { label: 'رأس مال الصفقات المغلقة (خارج)', value: -closedInvs.reduce((s, i) => s + i.entryAmount, 0), positive: false },
-              { label: 'أرباح موزعة مستلمة (داخل)', value: totalDividends, positive: true },
-              { label: 'المصاريف المعتمدة (خارج)', value: -totalExpenses, positive: false },
-              { label: 'التوزيعات للمستثمرين (خارج)', value: -totalDistributions, positive: false },
-            ].map(row => (
-              <div key={row.label} className="flex justify-between items-center py-2 border-b border-slate-100 last:border-0">
-                <span className="text-xs text-slate-600">{row.label}</span>
-                <span className={`text-sm font-semibold ${row.positive ? 'text-green-700' : 'text-red-600'}`}>
-                  {row.positive ? '+' : ''}{formatCurrency(row.value)}
-                </span>
+      {/* Quick links */}
+      <div className="card" style={{ padding:'1.25rem' }}>
+        <h3 className="section-title">روابط سريعة</h3>
+        <div style={{ display:'grid',gridTemplateColumns:'repeat(2,1fr)',gap:'0.75rem' }}>
+          {[
+            { href:'/investments', label:'الاستثمارات', icon:<TrendingUp size={18}/>, color:'var(--navy)' },
+            { href:'/investors',   label:'المستثمرون',  icon:<Users size={18}/>,       color:'#7c3aed' },
+            { href:'/expenses',    label:'المصاريف',    icon:<ArrowDownRight size={18}/>,color:'#dc2626' },
+            { href:'/reports',     label:'التقارير',    icon:<BarChart3 size={18}/>,    color:'#0891b2' },
+          ].map(link=>(
+            <Link key={link.href} href={link.href} style={{
+              display:'flex',alignItems:'center',justifyContent:'space-between',
+              padding:'0.875rem 1rem',borderRadius:'14px',
+              background:'#f8fafc',border:'1.5px solid #e2e8f0',
+              textDecoration:'none',color:link.color,
+              transition:'all 0.15s',
+            }}>
+              <div style={{ display:'flex',alignItems:'center',gap:'0.5rem' }}>
+                {link.icon}
+                <span style={{ fontWeight:600,fontSize:'0.85rem' }}>{link.label}</span>
               </div>
-            ))}
-            <div className="flex justify-between items-center pt-2 border-t-2 border-slate-300">
-              <span className="text-sm font-bold text-slate-800">الكاش المتوفر</span>
-              <span className={`text-base font-bold ${availableCash >= 0 ? 'text-green-700' : 'text-red-700'}`}>
-                {formatCurrency(availableCash)}
+              <ChevronLeft size={16} style={{ opacity:.5 }} />
+            </Link>
+          ))}
+        </div>
+      </div>
+
+      {/* Cash breakdown */}
+      <div className="card" style={{ padding:'1.25rem' }}>
+        <h3 className="section-title">تفصيل الكاش</h3>
+        <div style={{ display:'flex',flexDirection:'column',gap:'0' }}>
+          {[
+            { label:'رأس المال الداخل', value:totalCapital, plus:true },
+            { label:'مستثمر في صفقات قائمة', value:-activeInvs.reduce((s,i)=>s+i.entryAmount,0), plus:false },
+            { label:'عوائد صفقات مغلقة', value:closedInvs.reduce((s,i)=>s+(i.closingAmount||0),0), plus:true },
+            { label:'رأس مال صفقات مغلقة', value:-closedInvs.reduce((s,i)=>s+i.entryAmount,0), plus:false },
+            { label:'أرباح موزعة مستلمة', value:totalDivs, plus:true },
+            { label:'مصاريف معتمدة', value:-totalExp, plus:false },
+          ].map((row,i)=>(
+            <div key={i} style={{ display:'flex',justifyContent:'space-between',alignItems:'center',padding:'0.625rem 0',borderBottom:'1px solid #f1f5f9' }}>
+              <span style={{ fontSize:'0.8rem',color:'#475569' }}>{row.label}</span>
+              <span style={{ fontSize:'0.85rem',fontWeight:600,color:row.plus?'#059669':'#dc2626' }}>
+                {row.plus?'+':''}{formatCurrency(row.value)}
               </span>
             </div>
-          </div>
-        </div>
-
-        {/* Investment breakdown */}
-        <div className="card p-6">
-          <h3 className="section-title">نظرة على الاستثمارات</h3>
-          <div className="space-y-4">
-            {[
-              { label: 'إجمالي رأس المال المستثمر (قائمة)', value: totalInvested, color: 'bg-blue-200', barColor: 'bg-blue-600' },
-              { label: 'القيمة الحالية (قائمة)', value: totalCurrentVal, color: 'bg-green-200', barColor: 'bg-green-600' },
-              { label: 'إجمالي الأرباح الموزعة', value: totalDividends, color: 'bg-orange-200', barColor: 'bg-orange-500' },
-              { label: 'الأرباح التراكمية غير المحققة', value: Math.max(0, unrealizedProfit), color: 'bg-yellow-200', barColor: 'bg-yellow-500' },
-            ].map(row => (
-              <div key={row.label}>
-                <div className="flex justify-between text-sm mb-1">
-                  <span className="text-slate-600">{row.label}</span>
-                  <span className="font-semibold">{formatCurrency(row.value)}</span>
-                </div>
-                <div className={`w-full ${row.color} rounded-full h-2`}>
-                  <div className={`${row.barColor} h-2 rounded-full`}
-                    style={{ width: `${totalCapital > 0 ? Math.min((row.value / totalCapital) * 100, 100) : 0}%` }} />
-                </div>
-              </div>
-            ))}
+          ))}
+          <div style={{ display:'flex',justifyContent:'space-between',alignItems:'center',padding:'0.875rem 0 0' }}>
+            <span style={{ fontWeight:700,color:'var(--navy)' }}>الكاش المتوفر</span>
+            <span style={{ fontWeight:900,fontSize:'1.1rem',color:cash>=0?'#059669':'#dc2626' }}>{formatCurrency(cash)}</span>
           </div>
         </div>
       </div>
