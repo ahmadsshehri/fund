@@ -49,7 +49,34 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   useEffect(() => {
     if (user && (user.role === 'manager' || user.role === 'admin')) {
-      calculateCash().then(c => setCash(c.available)).catch(console.error);
+      // Correct cash calculation: capital_in - active investments + closed returns + dividends - expenses - distributions
+      const loadCash = async () => {
+        try {
+          const { collection, getDocs } = await import('firebase/firestore');
+          const { db } = await import('@/lib/firebase');
+          const [invSnap, invstSnap, expSnap, distSnap] = await Promise.all([
+            getDocs(collection(db, 'investors')),
+            getDocs(collection(db, 'investments')),
+            getDocs(collection(db, 'expenses')),
+            getDocs(collection(db, 'distributions')),
+          ]);
+          const invData = invSnap.docs.map(d => d.data());
+          const invstData = invstSnap.docs.map(d => d.data());
+          const expData = expSnap.docs.map(d => d.data());
+          const distData = distSnap.docs.map(d => d.data());
+
+          const capitalIn = invData.reduce((s: number, i: Record<string, unknown>) => s + ((i.totalPaid as number) || 0), 0);
+          const investedActive = invstData.filter((i: Record<string, unknown>) => i.status === "active").reduce((s: number, i: Record<string, unknown>) => s + ((i.entryAmount as number) || 0), 0);
+          const closingReturns = invstData.filter((i: Record<string, unknown>) => i.status === "closed").reduce((s: number, i: Record<string, unknown>) => s + ((i.closingAmount as number) || 0), 0);
+          const closedEntries = invstData.filter((i: Record<string, unknown>) => i.status === "closed").reduce((s: number, i: Record<string, unknown>) => s + ((i.entryAmount as number) || 0), 0);
+          const dividends = invstData.reduce((s: number, i: Record<string, unknown>) => s + ((i.dividends as {amount:number}[]) || []).reduce((ss, d) => ss + d.amount, 0), 0);
+          const expOut = expData.filter((e: Record<string, unknown>) => e.status === "approved").reduce((s: number, e: Record<string, unknown>) => s + ((e.amount as number) || 0), 0);
+          const distOut = distData.filter((d: Record<string, unknown>) => d.status === "approved" && d.affectsCash).reduce((s: number, d: Record<string, unknown>) => s + ((d.totalAmount as number) || 0), 0);
+
+          setCash(capitalIn - investedActive + closingReturns - closedEntries + dividends - expOut - distOut);
+        } catch (e) { console.error(e); }
+      };
+      loadCash();
     }
   }, [user]);
 
