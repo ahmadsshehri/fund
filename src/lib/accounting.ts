@@ -294,15 +294,17 @@ export async function calcInvestmentFinancials(
 
 /**
  * يحسب لقطة كاملة للمحفظة حتى تاريخ معين
+ * يحسب دائماً من البيانات المباشرة للدقة
  */
 export async function calcPortfolioSnapshot(asOfDate?: Date): Promise<PortfolioSnapshot> {
   const targetDate = asOfDate || new Date();
 
   // جلب كل البيانات بشكل متوازي
-  const [ledgerSnap, investmentsSnap, expensesSnap] = await Promise.all([
+  const [ledgerSnap, investmentsSnap, expensesSnap, investorsSnap] = await Promise.all([
     getDocs(query(collection(db, 'ledger'), orderBy('date', 'asc'))),
     getDocs(collection(db, 'investments')),
     getDocs(collection(db, 'expenses')),
+    getDocs(collection(db, 'investors')),
   ]);
 
   const ledger = ledgerSnap.docs
@@ -319,37 +321,16 @@ export async function calcPortfolioSnapshot(asOfDate?: Date): Promise<PortfolioS
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const expenses: any[] = expensesSnap.docs.map(d => d.data());
 
-  // ── رأس المال ──
-  const capitalTxs = ledger.filter(tx => tx.type === 'capital_in' || tx.type === 'capital_out');
-  const capitalInFromLedger  = capitalTxs.filter(t => t.type === 'capital_in').reduce((s, t) => s + (t.cashEffect || 0), 0);
-  const ownerCapitalOut = capitalTxs.filter(t => t.type === 'capital_out').reduce((s, t) => s + Math.abs(t.cashEffect || 0), 0);
+  // ── رأس المال دائماً من investors مباشرة ──
+  const finalOwnerCapitalIn = investorsSnap.docs.reduce((s, d) => s + ((d.data().totalPaid as number) || 0), 0);
+  const ownerCapitalOut = 0; // سيُضاف لاحقاً من ledger إذا وُجد
 
-  // ── النقد المتوفر ──
-  const ledgerHasData = ledger.some(t => t.type === 'capital_in');
-
-  // إذا الـ ledger فارغ: اقرأ رأس المال مباشرة من المستثمرين
-  const ownerCapitalIn = ledgerHasData
-    ? capitalInFromLedger
-    : investmentsSnap.docs.length > 0 // استخدم investors collection
-      ? 0 // سيُحسب من investors لاحقاً
-      : 0;
-
-  // رأس المال من المستثمرين مباشرة (للـ fallback)
-  const investorsSnap2 = await getDocs(collection(db, 'investors'));
-  const capitalFromInvestors = investorsSnap2.docs.reduce((s, d) => s + ((d.data().totalPaid as number) || 0), 0);
-  const finalOwnerCapitalIn = ledgerHasData ? capitalInFromLedger : capitalFromInvestors;
+  // ── هل الـ ledger مكتمل (بعد migration كامل)؟ ──
+  const ledgerCapitalIn = ledger.filter(t => t.type === 'capital_in').reduce((s, t) => s + (t.cashEffect || 0), 0);
+  // نعتبر ledger مكتملاً فقط إذا مجموعه يساوي رأس المال من المستثمرين تقريباً
+  const ledgerIsComplete = Math.abs(ledgerCapitalIn - finalOwnerCapitalIn) < 1;
 
   let availableCash: number;
-  if (ledgerHasData) {
-    availableCash = ledger.reduce((s, t) => s + (t.cashEffect || 0), 0);
-  } else {
-    // Fallback: المعادلة المحاسبية الصحيحة من البيانات
-    // كاش = رأس المال + متحصلات التخارجات + توزيعات − تمويل القائمة − تكلفة المغلقة − مصاريف
-    // لكن تكلفة المغلقة ترجع كمتحصلات، فتلغي بعض
-    // الصيغة المبسطة: رأس المال + ربح التخارجات + توزيعات − القائمة − مصاريف
-    // سيُحسب بعد حلقة الاستثمارات
-    availableCash = 0; // يُحدَّث بعد الحلقة
-  }
 
   // ── الاستثمارات ──
   const active     = investments.filter((i: {status:string}) => i.status === 'active');
@@ -393,18 +374,21 @@ export async function calcPortfolioSnapshot(asOfDate?: Date): Promise<PortfolioS
     .filter((e: {status:string}) => e.status === 'approved')
     .reduce((s: number, e: {amount:number}) => s + (e.amount || 0), 0);
 
-  // إذا لم يكن هناك سجل حركات: احسب الكاش بالمعادلة الصحيحة
-  // الكاش = رأس مال + متحصلات التخارجات + توزيعات − تمويل القائمة − مصاريف − سحوبات
-  const finalAvailableCash = ledgerHasData
-    ? availableCash
-    : finalOwnerCapitalIn
+  // الكاش = رأس المال + متحصلات الإغلاق + توزيعات − تكلفة القائمة − تكلفة المغلقة − مصاريف
+  // ملاحظة: closedTotalCost ترجع في exitProceeds فيلغيان بعضهما، المتبقي هو الربح المحقق
+  if (ledgerIsComplete) {
+    availableCash = ledger.reduce((s, t) => s + (t.cashEffect || 0), 0);
+  } else {
+    availableCash = finalOwnerCapitalIn
       - ownerCapitalOut
-      - activeTotalCost
-      + exitProceeds
-      - closedTotalCost
-      + dividendsReceived
-      - totalExpenses;
+      - activeTotalCost      // تمويل القائمة خرج من الكاش
+      + exitProceeds         // مبالغ الإغلاق رجعت للكاش
+      - closedTotalCost      // تكلفة المغلقة كانت قد خرجت
+      + dividendsReceived    // توزيعات دخلت الكاش
+      - totalExpenses;       // مصاريف خرجت
+  }
 
+  const finalAvailableCash = availableCash;
   const netPortfolioValue = finalAvailableCash + activeCurrentValue;
 
   return {
