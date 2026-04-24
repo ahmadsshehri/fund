@@ -120,9 +120,11 @@ export interface PortfolioSnapshot {
   activeCurrentValue: number;     // القيمة الحالية للاستثمارات القائمة
   activeBookValue: number;        // القيمة الدفترية للاستثمارات القائمة
   // الأرباح
-  realizedProfit: number;         // أرباح محققة (من تخارجات)
+  realizedProfit: number;         // أرباح محققة (من تخارجات) = مبلغ الإغلاق - التكلفة
   unrealizedProfit: number;       // أرباح غير محققة (من تقييمات)
   dividendsReceived: number;      // توزيعات نقدية مستلمة
+  exitProceeds: number;           // إجمالي مبالغ الإغلاق المستلمة (متحصلات التخارج)
+  closedTotalCost: number;        // تكلفة الاستثمارات المغلقة
   // المصروفات
   totalExpenses: number;
   // صافي قيمة المحفظة
@@ -322,52 +324,86 @@ export async function calcPortfolioSnapshot(asOfDate?: Date): Promise<PortfolioS
   const ownerCapitalIn  = capitalTxs.filter(t => t.type === 'capital_in').reduce((s, t) => s + (t.cashEffect || 0), 0);
   const ownerCapitalOut = capitalTxs.filter(t => t.type === 'capital_out').reduce((s, t) => s + Math.abs(t.cashEffect || 0), 0);
 
-  // ── النقد المتوفر من سجل الحركات ──
-  const availableCash = ledger.reduce((s, t) => s + (t.cashEffect || 0), 0);
+  // ── النقد المتوفر ──
+  // إذا وجد سجل حركات: نحسب منه مباشرة (أدق)
+  // إذا لا: نحسب من البيانات مباشرة بالمعادلة الصحيحة
+  const ledgerHasData = ledger.some(t => t.type === 'capital_in');
+  let availableCash: number;
+
+  if (ledgerHasData) {
+    // من سجل الحركات: مجموع كل cashEffect
+    availableCash = ledger.reduce((s, t) => s + (t.cashEffect || 0), 0);
+  } else {
+    // Fallback: المعادلة المحاسبية الصحيحة من البيانات
+    // كاش = رأس المال + متحصلات التخارجات + توزيعات − تمويل القائمة − تكلفة المغلقة − مصاريف
+    // لكن تكلفة المغلقة ترجع كمتحصلات، فتلغي بعض
+    // الصيغة المبسطة: رأس المال + ربح التخارجات + توزيعات − القائمة − مصاريف
+    // سيُحسب بعد حلقة الاستثمارات
+    availableCash = 0; // يُحدَّث بعد الحلقة
+  }
 
   // ── الاستثمارات ──
-  const active     = investments.filter(i => i.status === 'active');
-  const closed     = investments.filter(i => i.status === 'closed');
-  const distressed = investments.filter(i => i.status === 'distressed');
+  const active     = investments.filter((i: {status:string}) => i.status === 'active');
+  const closed     = investments.filter((i: {status:string}) => i.status === 'closed');
+  const distressed = investments.filter((i: {status:string}) => i.status === 'distressed');
 
-  // للاستثمارات القائمة: نحسب من البيانات المخزنة (أسرع)
   // القاعدة: القيمة الحالية للمغلق = 0
   let activeTotalCost = 0, activeCurrentValue = 0, activeBookValue = 0;
   let realizedProfit = 0, unrealizedProfit = 0, dividendsReceived = 0;
+  let exitProceeds = 0; // متحصلات التخارج الفعلية (مبالغ الإغلاق)
+  let closedTotalCost = 0; // تكلفة الاستثمارات المغلقة
 
   for (const inv of investments) {
     const isClosed = inv.status === 'closed';
     const entryAmt = inv.entryAmount || 0;
+    // الأرباح الموزعة: فقط من الاستثمارات القائمة (المغلق divs حُسبت في realizedProfit)
     const divs = (inv.dividends || []).reduce((s: number, d: {amount:number}) => s + d.amount, 0);
-    dividendsReceived += divs;
 
     if (!isClosed) {
-      // قائم أو متعثر
+      // قائم أو متعثر: له قيمة حالية، أرباحه الموزعة دخلت الكاش
       const cost = entryAmt;
       const cv = inv.currentValue || entryAmt;
-      activeTotalCost     += cost;
-      activeCurrentValue  += cv;
-      activeBookValue     += cost; // القيمة الدفترية = التكلفة (مبسّط)
-      unrealizedProfit    += (cv - cost);
+      activeTotalCost    += cost;
+      activeCurrentValue += cv;
+      activeBookValue    += cost;
+      unrealizedProfit   += (cv - cost);
+      dividendsReceived  += divs; // أرباح موزعة من القائمة دخلت الكاش
     } else {
-      // مغلق: الربح المحقق فقط، القيمة الحالية = 0
+      // مغلق: القيمة الحالية = 0
+      // ربح التخارج = مبلغ الإغلاق - تكلفة الدخول (بدون الأرباح الموزعة)
       const closing = inv.closingAmount || 0;
-      realizedProfit += (closing - entryAmt) + divs;
+      exitProceeds    += closing;
+      closedTotalCost += entryAmt;
+      // الربح المحقق = فرق التخارج فقط (الأرباح الموزعة من المغلق جزء منفصل)
+      realizedProfit  += (closing - entryAmt);
+      dividendsReceived += divs; // أرباح الاستثمار المغلق قبل إغلاقه
     }
   }
 
   const totalExpenses = expenses
-    .filter(e => e.status === 'approved')
+    .filter((e: {status:string}) => e.status === 'approved')
     .reduce((s: number, e: {amount:number}) => s + (e.amount || 0), 0);
 
-  const netPortfolioValue = availableCash + activeCurrentValue;
+  // إذا لم يكن هناك سجل حركات: احسب الكاش بالمعادلة الصحيحة
+  // الكاش = رأس مال + متحصلات التخارجات + توزيعات − تمويل القائمة − مصاريف − سحوبات
+  const finalAvailableCash = ledgerHasData
+    ? availableCash
+    : (ownerCapitalIn - ownerCapitalOut)
+      + exitProceeds         // مبالغ الإغلاق المستلمة
+      + dividendsReceived    // توزيعات نقدية دخلت الكاش
+      - activeTotalCost      // تمويل الاستثمارات القائمة
+      - closedTotalCost      // تكلفة المغلقة (خرجت من الكاش في وقتها)
+      - totalExpenses;       // مصاريف
+
+  const netPortfolioValue = finalAvailableCash + activeCurrentValue;
 
   return {
     asOfDate: targetDate,
     ownerCapitalIn, ownerCapitalOut, netOwnerCapital: ownerCapitalIn - ownerCapitalOut,
-    availableCash,
+    availableCash: finalAvailableCash,
     activeTotalCost, activeCurrentValue, activeBookValue,
     realizedProfit, unrealizedProfit, dividendsReceived,
+    exitProceeds, closedTotalCost,
     totalExpenses,
     netPortfolioValue,
     activeCount: active.length,
