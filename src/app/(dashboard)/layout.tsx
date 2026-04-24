@@ -4,8 +4,6 @@ import { useEffect, useState, useCallback } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import Link from 'next/link';
 import { useAuth } from '@/context/AuthContext';
-import { collection, getDocs } from 'firebase/firestore';
-import { db } from '@/lib/firebase';
 import { formatCurrency } from '@/lib/utils';
 import {
   LayoutDashboard, Users, TrendingUp, Receipt, GitBranch,
@@ -51,24 +49,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const loadCash = useCallback(async () => {
     if (!user || user.role === 'investor') return;
     try {
-      const [invSnap, invstSnap, expSnap, distSnap] = await Promise.all([
-        getDocs(collection(db, 'investors')),
-        getDocs(collection(db, 'investments')),
-        getDocs(collection(db, 'expenses')),
-        getDocs(collection(db, 'distributions')),
-      ]);
-      const inv = invSnap.docs.map(d => d.data());
-      const invst = invstSnap.docs.map(d => d.data());
-      const exp = expSnap.docs.map(d => d.data());
-      const dist = distSnap.docs.map(d => d.data());
-      const capitalIn = inv.reduce((s: number, i: Record<string,unknown>) => s + ((i.totalPaid as number)||0), 0);
-      const activeOut = invst.filter((i: Record<string,unknown>) => i.status==='active').reduce((s: number, i: Record<string,unknown>) => s + ((i.entryAmount as number)||0), 0);
-      const closedIn  = invst.filter((i: Record<string,unknown>) => i.status==='closed').reduce((s: number, i: Record<string,unknown>) => s + ((i.closingAmount as number)||0), 0);
-      const closedOut = invst.filter((i: Record<string,unknown>) => i.status==='closed').reduce((s: number, i: Record<string,unknown>) => s + ((i.entryAmount as number)||0), 0);
-      const divs = invst.reduce((s: number, i: Record<string,unknown>) => s + ((i.dividends as {amount:number}[])||[]).reduce((ss,d)=>ss+d.amount,0), 0);
-      const expOut = exp.filter((e: Record<string,unknown>) => e.status==='approved').reduce((s: number, e: Record<string,unknown>) => s + ((e.amount as number)||0), 0);
-      const distOut = dist.filter((d: Record<string,unknown>) => d.status==='approved'&&d.affectsCash).reduce((s: number, d: Record<string,unknown>) => s + ((d.totalAmount as number)||0), 0);
-      setCash(capitalIn - activeOut + closedIn - closedOut + divs - expOut - distOut);
+      // استخدام نفس دالة الداشبورد لضمان تطابق الأرقام
+      const { calcPortfolioSnapshot } = await import('@/lib/accounting');
+      const snapshot = await calcPortfolioSnapshot();
+      setCash(snapshot.availableCash);
     } catch(e) { console.error(e); }
   }, [user]);
 
