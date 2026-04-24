@@ -109,11 +109,19 @@ export default function InvestmentsPage() {
   const [editDividend, setEditDividend] = useState<{ invId: string; record: DividendRecord } | null>(null);
   const [editValueUpdate, setEditValueUpdate] = useState<{ invId: string; record: ValueUpdate } | null>(null);
 
+  const [ownerCapital, setOwnerCapital] = useState(0);
+
   // ─── Load ─────────────────────────────────────────────────────────────────
   const load = async () => {
     setLoading(true);
     try {
-      const snap = await getDocs(query(collection(db, 'investments'), orderBy('createdAt', 'desc')));
+      const [snap, invSnap] = await Promise.all([
+        getDocs(query(collection(db, 'investments'), orderBy('createdAt', 'desc'))),
+        getDocs(collection(db, 'investors')),
+      ]);
+      // رأس المال الحقيقي من المستثمرين
+      const capital = invSnap.docs.reduce((s, d) => s + ((d.data().totalPaid as number) || 0), 0);
+      setOwnerCapital(capital);
       setInvestments(snap.docs.map(d => {
         const v = d.data();
         return {
@@ -144,12 +152,14 @@ export default function InvestmentsPage() {
   const activeInvs = investments.filter(i => i.status === 'active');
   const closedInvs = investments.filter(i => i.status === 'closed');
 
-  const totalEntryAll = investments.reduce((s, i) => s + i.entryAmount, 0);
+  // إجمالي رأس المال = ما دفعه المستثمرون (وليس مجموع مبالغ الاستثمارات)
+  const totalCapitalReal = ownerCapital;
   const totalDividendsAll = investments.reduce((s, i) => s + i.dividends.reduce((ss, d) => ss + d.amount, 0), 0);
   const totalCapitalGainAll = closedInvs.reduce((s, i) => s + ((i.closingAmount || 0) - i.entryAmount), 0)
     + activeInvs.reduce((s, i) => s + (i.currentValue - i.entryAmount), 0);
   const totalProfitAll = totalDividendsAll + totalCapitalGainAll;
-  const portfolioReturn = totalEntryAll > 0 ? (totalProfitAll / totalEntryAll) * 100 : 0;
+  // العائد على رأس المال الحقيقي
+  const portfolioReturn = totalCapitalReal > 0 ? (totalProfitAll / totalCapitalReal) * 100 : 0;
 
   const filtered = investments.filter(inv =>
     (inv.name.toLowerCase().includes(search.toLowerCase()) || inv.entity.toLowerCase().includes(search.toLowerCase())) &&
@@ -506,7 +516,7 @@ export default function InvestmentsPage() {
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-6">
           <div>
             <p className="text-blue-300 text-xs mb-1">إجمالي رأس المال</p>
-            <p className="text-xl font-bold">{formatCurrency(totalEntryAll)}</p>
+            <p className="text-xl font-bold">{formatCurrency(totalCapitalReal)}</p>
           </div>
           <div>
             <p className="text-blue-300 text-xs mb-1">إجمالي الأرباح الموزعة</p>
