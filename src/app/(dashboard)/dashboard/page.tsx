@@ -251,9 +251,9 @@ export default function DashboardPage() {
             <div style={{ padding:'0.5rem 0', borderBottom:'1px solid #f1f5f9' }}>
               <p style={{ fontSize:'0.7rem',fontWeight:700,color:'var(--muted)',marginBottom:'0.5rem',letterSpacing:'0.05em' }}>تدفقات داخلة ↓</p>
               {[
-                { label:'رأس مال الملاك الداخل', value:s.ownerCapitalIn, positive:true },
-                { label:'متحصلات التخارجات', value:s.realizedProfit > 0 ? s.activeTotalCost + s.realizedProfit - (s.unrealizedProfit > 0 ? s.unrealizedProfit : 0) : s.activeTotalCost, positive:true, note:'مبالغ الإغلاق المستلمة' },
-                { label:'توزيعات وأرباح مستلمة', value:s.dividendsReceived, positive:true },
+                { label:'رأس مال الملاك الداخل',    value: s.ownerCapitalIn,       note: '' },
+                { label:'متحصلات التخارجات',         value: s.exitProceeds,         note: 'مبالغ الإغلاق المستلمة فعلياً' },
+                { label:'توزيعات وأرباح مستلمة',    value: s.dividendsReceived,    note: 'أرباح نقدية دخلت الكاش' },
               ].map(row=>(
                 <div key={row.label} style={{ display:'flex',justifyContent:'space-between',alignItems:'center',padding:'0.375rem 0' }}>
                   <div>
@@ -268,12 +268,16 @@ export default function DashboardPage() {
             <div style={{ padding:'0.5rem 0', borderBottom:'2px solid #e2e8f0' }}>
               <p style={{ fontSize:'0.7rem',fontWeight:700,color:'var(--muted)',marginBottom:'0.5rem',letterSpacing:'0.05em' }}>تدفقات خارجة ↑</p>
               {[
-                { label:'تمويل الاستثمارات القائمة', value:s.activeTotalCost },
-                { label:'المصروفات المعتمدة', value:s.totalExpenses },
-                { label:'سحوبات الملاك', value:s.ownerCapitalOut },
-              ].map(row=>(
+                { label:'تمويل الاستثمارات القائمة',  value: s.activeTotalCost,  note: 'القائمة حالياً فقط' },
+                { label:'تكلفة الاستثمارات المغلقة',  value: s.closedTotalCost,  note: 'خرجت سابقاً ورجعت كمتحصلات' },
+                { label:'المصروفات المعتمدة',           value: s.totalExpenses,    note: '' },
+                { label:'سحوبات الملاك',                value: s.ownerCapitalOut,  note: '' },
+              ].filter(r => r.value > 0).map(row=>(
                 <div key={row.label} style={{ display:'flex',justifyContent:'space-between',alignItems:'center',padding:'0.375rem 0' }}>
-                  <span style={{ fontSize:'0.8rem',color:'#475569' }}>{row.label}</span>
+                  <div>
+                    <span style={{ fontSize:'0.8rem',color:'#475569' }}>{row.label}</span>
+                    {row.note && <span style={{ fontSize:'0.65rem',color:'#94a3b8',marginRight:'6px' }}>({row.note})</span>}
+                  </div>
                   <span style={{ fontSize:'0.85rem',fontWeight:600,color:'#dc2626' }}>-{formatCurrency(row.value)}</span>
                 </div>
               ))}
@@ -282,7 +286,7 @@ export default function DashboardPage() {
             <div style={{ display:'flex',justifyContent:'space-between',alignItems:'center',padding:'0.875rem 0 0' }}>
               <div>
                 <span style={{ fontWeight:800,color:'var(--navy)',fontSize:'0.95rem' }}>النقد المتوفر</span>
-                <span style={{ fontSize:'0.68rem',color:'var(--muted)',marginRight:'8px' }}>= نقد + لا يشمل الاستثمارات القائمة</span>
+                <span style={{ fontSize:'0.68rem',color:'var(--muted)',marginRight:'8px' }}>= لا يشمل الاستثمارات القائمة</span>
               </div>
               <span style={{ fontWeight:900,fontSize:'1.1rem',color:s.availableCash>=0?'#059669':'#dc2626' }}>
                 {formatCurrency(s.availableCash)}
