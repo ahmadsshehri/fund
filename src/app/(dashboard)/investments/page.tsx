@@ -105,6 +105,10 @@ export default function InvestmentsPage() {
   const [profitForm, setProfitForm] = useState({ date: '', newValue: '', notes: '' });
   const [dividendForm, setDividendForm] = useState({ date: '', amount: '', notes: '' });
 
+  // Edit states for dividends & value updates
+  const [editDividend, setEditDividend] = useState<{ invId: string; record: DividendRecord } | null>(null);
+  const [editValueUpdate, setEditValueUpdate] = useState<{ invId: string; record: ValueUpdate } | null>(null);
+
   // ─── Load ─────────────────────────────────────────────────────────────────
   const load = async () => {
     setLoading(true);
@@ -368,6 +372,121 @@ export default function InvestmentsPage() {
   };
 
   // ─── Render ───────────────────────────────────────────────────────────────
+
+  // ─── Edit Dividend ─────────────────────────────────────────────────────────
+  const handleEditDividend = async () => {
+    if (!editDividend || !dividendForm.date || !dividendForm.amount) { setError('يرجى تعبئة جميع الحقول'); return; }
+    setSaving(true); setError('');
+    try {
+      const inv = investments.find(i => i.id === editDividend.invId);
+      if (!inv) throw new Error('الاستثمار غير موجود');
+      const updatedDividends = inv.dividends.map(d =>
+        d.id === editDividend.record.id
+          ? { ...d, date: Timestamp.fromDate(new Date(dividendForm.date)), amount: parseFloat(dividendForm.amount), notes: dividendForm.notes }
+          : { ...d, date: Timestamp.fromDate(d.date) }
+      );
+      const totalDivs = updatedDividends.reduce((s, d) => s + (d.amount as number), 0);
+      const capitalGain = inv.status === 'closed' ? (inv.closingAmount || 0) - inv.entryAmount : inv.currentValue - inv.entryAmount;
+      const totalProfit = totalDivs + capitalGain;
+      const trueReturn = inv.entryAmount > 0 ? (totalProfit / inv.entryAmount) * 100 : 0;
+      const days = daysBetween(inv.entryDate, inv.closingDate);
+      const annualReturn = days > 0 ? trueReturn / (days / 365) : 0;
+      await updateDoc(doc(db, 'investments', editDividend.invId), {
+        dividends: updatedDividends, totalProfit, trueReturn, annualReturn,
+      });
+      setEditDividend(null);
+      setDividendForm({ date: '', amount: '', notes: '' });
+      await load();
+      // Refresh detail modal
+      const updated = investments.find(i => i.id === editDividend.invId);
+      if (updated) setShowDetail(updated);
+    } catch (e: unknown) { setError(e instanceof Error ? e.message : 'حدث خطأ'); }
+    finally { setSaving(false); }
+  };
+
+  // ─── Delete Dividend ───────────────────────────────────────────────────────
+  const handleDeleteDividend = async (inv: Investment, dividendId: string) => {
+    if (!confirm('هل تريد حذف هذه الأرباح الموزعة؟')) return;
+    setSaving(true);
+    try {
+      const updatedDividends = inv.dividends
+        .filter(d => d.id !== dividendId)
+        .map(d => ({ ...d, date: Timestamp.fromDate(d.date) }));
+      const totalDivs = updatedDividends.reduce((s, d) => s + (d.amount as number), 0);
+      const capitalGain = inv.status === 'closed' ? (inv.closingAmount || 0) - inv.entryAmount : inv.currentValue - inv.entryAmount;
+      const totalProfit = totalDivs + capitalGain;
+      const trueReturn = inv.entryAmount > 0 ? (totalProfit / inv.entryAmount) * 100 : 0;
+      const days = daysBetween(inv.entryDate, inv.closingDate);
+      const annualReturn = days > 0 ? trueReturn / (days / 365) : 0;
+      await updateDoc(doc(db, 'investments', inv.id), {
+        dividends: updatedDividends, totalProfit, trueReturn, annualReturn,
+      });
+      await load();
+    } catch (e) { console.error(e); }
+    finally { setSaving(false); }
+  };
+
+  // ─── Edit Value Update ─────────────────────────────────────────────────────
+  const handleEditValueUpdate = async () => {
+    if (!editValueUpdate || !profitForm.date || !profitForm.newValue) { setError('يرجى تعبئة جميع الحقول'); return; }
+    setSaving(true); setError('');
+    try {
+      const inv = investments.find(i => i.id === editValueUpdate.invId);
+      if (!inv) throw new Error('الاستثمار غير موجود');
+      const newValue = parseFloat(profitForm.newValue);
+      const updatedUpdates = inv.valueUpdates.map((u, idx) => {
+        if (u.id !== editValueUpdate.record.id) return { ...u, date: Timestamp.fromDate(u.date) };
+        const prevValue = idx > 0 ? inv.valueUpdates[idx - 1].newValue : inv.entryAmount;
+        return {
+          ...u,
+          date: Timestamp.fromDate(new Date(profitForm.date)),
+          newValue,
+          previousValue: prevValue,
+          profit: newValue - prevValue,
+          notes: profitForm.notes,
+        };
+      });
+      const totalDivs = inv.dividends.reduce((s, d) => s + d.amount, 0);
+      const capitalGain = newValue - inv.entryAmount;
+      const totalProfit = totalDivs + capitalGain;
+      const trueReturn = inv.entryAmount > 0 ? (totalProfit / inv.entryAmount) * 100 : 0;
+      const days = daysBetween(inv.entryDate);
+      const annualReturn = days > 0 ? trueReturn / (days / 365) : 0;
+      await updateDoc(doc(db, 'investments', editValueUpdate.invId), {
+        currentValue: newValue, totalProfit, trueReturn, annualReturn,
+        valueUpdates: updatedUpdates,
+      });
+      setEditValueUpdate(null);
+      setProfitForm({ date: '', newValue: '', notes: '' });
+      await load();
+    } catch (e: unknown) { setError(e instanceof Error ? e.message : 'حدث خطأ'); }
+    finally { setSaving(false); }
+  };
+
+  // ─── Delete Value Update ───────────────────────────────────────────────────
+  const handleDeleteValueUpdate = async (inv: Investment, updateId: string) => {
+    if (!confirm('هل تريد حذف هذا التحديث؟ سيُعاد حساب القيمة الحالية تلقائياً.')) return;
+    setSaving(true);
+    try {
+      const filtered = inv.valueUpdates.filter(u => u.id !== updateId);
+      // القيمة الحالية = آخر تحديث إن وجد، وإلا رأس المال
+      const newCurrentValue = filtered.length > 0
+        ? filtered[filtered.length - 1].newValue
+        : inv.entryAmount;
+      const totalDivs = inv.dividends.reduce((s, d) => s + d.amount, 0);
+      const capitalGain = newCurrentValue - inv.entryAmount;
+      const totalProfit = totalDivs + capitalGain;
+      const trueReturn = inv.entryAmount > 0 ? (totalProfit / inv.entryAmount) * 100 : 0;
+      const days = daysBetween(inv.entryDate);
+      const annualReturn = days > 0 ? trueReturn / (days / 365) : 0;
+      await updateDoc(doc(db, 'investments', inv.id), {
+        currentValue: newCurrentValue, totalProfit, trueReturn, annualReturn,
+        valueUpdates: filtered.map(u => ({ ...u, date: Timestamp.fromDate(u.date) })),
+      });
+      await load();
+    } catch (e) { console.error(e); }
+    finally { setSaving(false); }
+  };
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -554,22 +673,40 @@ export default function InvestmentsPage() {
                 {/* Dividends history */}
                 {showDetail.dividends.length > 0 && (
                   <div>
-                    <p className="text-sm font-semibold text-slate-700 mb-2 flex items-center gap-2"><Banknote size={15} className="text-orange-500" />الأرباح الموزعة ({showDetail.dividends.length})</p>
+                    <p className="text-sm font-semibold text-slate-700 mb-2 flex items-center gap-2">
+                      <Banknote size={15} className="text-orange-500" />
+                      الأرباح الموزعة ({showDetail.dividends.length})
+                    </p>
                     <div className="table-container">
                       <table className="table">
-                        <thead><tr><th>التاريخ</th><th>المبلغ</th><th>ملاحظات</th></tr></thead>
+                        <thead><tr><th>التاريخ</th><th>المبلغ</th><th>ملاحظات</th><th></th></tr></thead>
                         <tbody>
                           {showDetail.dividends.map((d, i) => (
                             <tr key={i}>
                               <td>{formatDate(d.date)}</td>
                               <td className="text-orange-600 font-semibold">{formatCurrency(d.amount)}</td>
                               <td className="text-slate-500 text-xs">{d.notes || '—'}</td>
+                              <td>
+                                <div className="flex items-center gap-1">
+                                  <button
+                                    onClick={() => {
+                                      setEditDividend({ invId: showDetail.id, record: d });
+                                      setDividendForm({ date: d.date.toISOString().split('T')[0], amount: String(d.amount), notes: d.notes || '' });
+                                    }}
+                                    className="icon-btn info" title="تعديل"
+                                  ><Edit2 size={13} /></button>
+                                  <button
+                                    onClick={() => handleDeleteDividend(showDetail, d.id)}
+                                    className="icon-btn danger" title="حذف"
+                                  ><Trash2 size={13} /></button>
+                                </div>
+                              </td>
                             </tr>
                           ))}
                           <tr className="bg-orange-50">
                             <td className="font-bold text-orange-800">الإجمالي</td>
                             <td className="font-bold text-orange-700">{formatCurrency(r.totalDividends)}</td>
-                            <td>—</td>
+                            <td>—</td><td>—</td>
                           </tr>
                         </tbody>
                       </table>
@@ -580,10 +717,13 @@ export default function InvestmentsPage() {
                 {/* Value updates history */}
                 {showDetail.valueUpdates.length > 0 && (
                   <div>
-                    <p className="text-sm font-semibold text-slate-700 mb-2 flex items-center gap-2"><TrendingUp size={15} className="text-purple-500" />تحديثات القيمة ({showDetail.valueUpdates.length})</p>
+                    <p className="text-sm font-semibold text-slate-700 mb-2 flex items-center gap-2">
+                      <TrendingUp size={15} className="text-purple-500" />
+                      تحديثات القيمة ({showDetail.valueUpdates.length})
+                    </p>
                     <div className="table-container">
                       <table className="table">
-                        <thead><tr><th>التاريخ</th><th>السابقة</th><th>الجديدة</th><th>الفرق</th><th>ملاحظات</th></tr></thead>
+                        <thead><tr><th>التاريخ</th><th>السابقة</th><th>الجديدة</th><th>الفرق</th><th>ملاحظات</th><th></th></tr></thead>
                         <tbody>
                           {showDetail.valueUpdates.map((u, i) => (
                             <tr key={i}>
@@ -594,6 +734,21 @@ export default function InvestmentsPage() {
                                 {u.profit >= 0 ? '+' : ''}{formatCurrency(u.profit)}
                               </td>
                               <td className="text-slate-500 text-xs">{u.notes || '—'}</td>
+                              <td>
+                                <div className="flex items-center gap-1">
+                                  <button
+                                    onClick={() => {
+                                      setEditValueUpdate({ invId: showDetail.id, record: u });
+                                      setProfitForm({ date: u.date.toISOString().split('T')[0], newValue: String(u.newValue), notes: u.notes || '' });
+                                    }}
+                                    className="icon-btn info" title="تعديل"
+                                  ><Edit2 size={13} /></button>
+                                  <button
+                                    onClick={() => handleDeleteValueUpdate(showDetail, u.id)}
+                                    className="icon-btn danger" title="حذف"
+                                  ><Trash2 size={13} /></button>
+                                </div>
+                              </td>
                             </tr>
                           ))}
                         </tbody>
@@ -876,6 +1031,101 @@ export default function InvestmentsPage() {
             <div className="modal-footer">
               <button onClick={() => setConfirmDelete(null)} className="btn-secondary">إلغاء</button>
               <button onClick={handleDelete} disabled={saving} className="btn-danger"><Trash2 size={16} />{saving ? 'جاري الحذف...' : 'حذف نهائياً'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Edit Dividend Modal ───────────────────────────────────────────────── */}
+      {editDividend && (
+        <div className="modal-overlay" onClick={() => setEditDividend(null)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2 className="text-lg font-bold flex items-center gap-2">
+                <Banknote size={20} className="text-orange-500" />
+                تعديل توزيع الأرباح
+              </h2>
+              <button onClick={() => setEditDividend(null)} className="p-1.5 hover:bg-slate-100 rounded-lg"><X size={18} /></button>
+            </div>
+            <div className="modal-body space-y-4">
+              <div className="bg-orange-50 border border-orange-200 rounded-xl p-3">
+                <p className="text-xs text-orange-600">القيمة الحالية: <strong>{formatCurrency(editDividend.record.amount)}</strong> — {formatDate(editDividend.record.date)}</p>
+              </div>
+              {error && <div className="alert-danger text-sm"><AlertCircle size={16} />{error}</div>}
+              <div>
+                <label className="label">التاريخ *</label>
+                <input className="input" type="date" value={dividendForm.date} onChange={e => setDividendForm({ ...dividendForm, date: e.target.value })} />
+              </div>
+              <div>
+                <label className="label">المبلغ (ريال) *</label>
+                <input className="input" type="number" value={dividendForm.amount} onChange={e => setDividendForm({ ...dividendForm, amount: e.target.value })} />
+              </div>
+              <div>
+                <label className="label">ملاحظات</label>
+                <input className="input" value={dividendForm.notes} onChange={e => setDividendForm({ ...dividendForm, notes: e.target.value })} />
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button onClick={() => setEditDividend(null)} className="btn-secondary">إلغاء</button>
+              <button onClick={handleEditDividend} disabled={saving} className="btn-primary">
+                <Save size={16} />{saving ? 'جاري...' : 'حفظ التعديل'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Edit Value Update Modal ───────────────────────────────────────────── */}
+      {editValueUpdate && (
+        <div className="modal-overlay" onClick={() => setEditValueUpdate(null)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2 className="text-lg font-bold flex items-center gap-2">
+                <TrendingUp size={20} className="text-purple-500" />
+                تعديل تحديث القيمة
+              </h2>
+              <button onClick={() => setEditValueUpdate(null)} className="p-1.5 hover:bg-slate-100 rounded-lg"><X size={18} /></button>
+            </div>
+            <div className="modal-body space-y-4">
+              <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-3">
+                <p className="text-xs text-yellow-700">
+                  القيمة الحالية المسجلة: <strong>{formatCurrency(editValueUpdate.record.newValue)}</strong> — {formatDate(editValueUpdate.record.date)}
+                </p>
+              </div>
+              {error && <div className="alert-danger text-sm"><AlertCircle size={16} />{error}</div>}
+              <div>
+                <label className="label">تاريخ التحديث *</label>
+                <input className="input" type="date" value={profitForm.date} onChange={e => setProfitForm({ ...profitForm, date: e.target.value })} />
+              </div>
+              <div>
+                <label className="label">القيمة الجديدة (ريال) *</label>
+                <input className="input" type="number" value={profitForm.newValue} onChange={e => setProfitForm({ ...profitForm, newValue: e.target.value })} />
+                {profitForm.newValue && (
+                  <div className="mt-2 bg-slate-50 rounded-lg p-3 space-y-1 text-sm">
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">القيمة السابقة</span>
+                      <span>{formatCurrency(editValueUpdate.record.previousValue)}</span>
+                    </div>
+                    <div className="flex justify-between border-t border-slate-200 pt-1">
+                      <span className="text-slate-500">الفرق</span>
+                      <span className={`font-bold ${parseFloat(profitForm.newValue) >= editValueUpdate.record.previousValue ? 'text-green-600' : 'text-red-600'}`}>
+                        {parseFloat(profitForm.newValue) >= editValueUpdate.record.previousValue ? '+' : ''}
+                        {formatCurrency(parseFloat(profitForm.newValue) - editValueUpdate.record.previousValue)}
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div>
+                <label className="label">ملاحظات</label>
+                <input className="input" value={profitForm.notes} onChange={e => setProfitForm({ ...profitForm, notes: e.target.value })} />
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button onClick={() => setEditValueUpdate(null)} className="btn-secondary">إلغاء</button>
+              <button onClick={handleEditValueUpdate} disabled={saving} className="btn-primary">
+                <Save size={16} />{saving ? 'جاري...' : 'حفظ التعديل'}
+              </button>
             </div>
           </div>
         </div>
