@@ -321,17 +321,26 @@ export async function calcPortfolioSnapshot(asOfDate?: Date): Promise<PortfolioS
 
   // ── رأس المال ──
   const capitalTxs = ledger.filter(tx => tx.type === 'capital_in' || tx.type === 'capital_out');
-  const ownerCapitalIn  = capitalTxs.filter(t => t.type === 'capital_in').reduce((s, t) => s + (t.cashEffect || 0), 0);
+  const capitalInFromLedger  = capitalTxs.filter(t => t.type === 'capital_in').reduce((s, t) => s + (t.cashEffect || 0), 0);
   const ownerCapitalOut = capitalTxs.filter(t => t.type === 'capital_out').reduce((s, t) => s + Math.abs(t.cashEffect || 0), 0);
 
   // ── النقد المتوفر ──
-  // إذا وجد سجل حركات: نحسب منه مباشرة (أدق)
-  // إذا لا: نحسب من البيانات مباشرة بالمعادلة الصحيحة
   const ledgerHasData = ledger.some(t => t.type === 'capital_in');
-  let availableCash: number;
 
+  // إذا الـ ledger فارغ: اقرأ رأس المال مباشرة من المستثمرين
+  const ownerCapitalIn = ledgerHasData
+    ? capitalInFromLedger
+    : investmentsSnap.docs.length > 0 // استخدم investors collection
+      ? 0 // سيُحسب من investors لاحقاً
+      : 0;
+
+  // رأس المال من المستثمرين مباشرة (للـ fallback)
+  const investorsSnap2 = await getDocs(collection(db, 'investors'));
+  const capitalFromInvestors = investorsSnap2.docs.reduce((s, d) => s + ((d.data().totalPaid as number) || 0), 0);
+  const finalOwnerCapitalIn = ledgerHasData ? capitalInFromLedger : capitalFromInvestors;
+
+  let availableCash: number;
   if (ledgerHasData) {
-    // من سجل الحركات: مجموع كل cashEffect
     availableCash = ledger.reduce((s, t) => s + (t.cashEffect || 0), 0);
   } else {
     // Fallback: المعادلة المحاسبية الصحيحة من البيانات
@@ -388,18 +397,19 @@ export async function calcPortfolioSnapshot(asOfDate?: Date): Promise<PortfolioS
   // الكاش = رأس مال + متحصلات التخارجات + توزيعات − تمويل القائمة − مصاريف − سحوبات
   const finalAvailableCash = ledgerHasData
     ? availableCash
-    : (ownerCapitalIn - ownerCapitalOut)
-      + exitProceeds         // مبالغ الإغلاق المستلمة
-      + dividendsReceived    // توزيعات نقدية دخلت الكاش
-      - activeTotalCost      // تمويل الاستثمارات القائمة
-      - closedTotalCost      // تكلفة المغلقة (خرجت من الكاش في وقتها)
-      - totalExpenses;       // مصاريف
+    : finalOwnerCapitalIn
+      - ownerCapitalOut
+      - activeTotalCost
+      + exitProceeds
+      - closedTotalCost
+      + dividendsReceived
+      - totalExpenses;
 
   const netPortfolioValue = finalAvailableCash + activeCurrentValue;
 
   return {
     asOfDate: targetDate,
-    ownerCapitalIn, ownerCapitalOut, netOwnerCapital: ownerCapitalIn - ownerCapitalOut,
+    ownerCapitalIn: finalOwnerCapitalIn, ownerCapitalOut, netOwnerCapital: finalOwnerCapitalIn - ownerCapitalOut,
     availableCash: finalAvailableCash,
     activeTotalCost, activeCurrentValue, activeBookValue,
     realizedProfit, unrealizedProfit, dividendsReceived,
