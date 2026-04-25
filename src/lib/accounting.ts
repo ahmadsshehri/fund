@@ -326,9 +326,8 @@ export async function calcPortfolioSnapshot(asOfDate?: Date): Promise<PortfolioS
   const ownerCapitalOut = 0; // سيُضاف لاحقاً من ledger إذا وُجد
 
   // ── هل الـ ledger مكتمل (بعد migration كامل)؟ ──
-  const ledgerCapitalIn = ledger.filter(t => t.type === 'capital_in').reduce((s, t) => s + (t.cashEffect || 0), 0);
-  // نعتبر ledger مكتملاً فقط إذا مجموعه يساوي رأس المال من المستثمرين تقريباً
-  const ledgerIsComplete = Math.abs(ledgerCapitalIn - finalOwnerCapitalIn) < 1;
+  // نتجاهل الـ ledger ونحسب دائماً من البيانات المباشرة للدقة
+  const ledgerIsComplete = false; // سيُفعَّل لاحقاً بعد اكتمال الترحيل
 
   let availableCash: number;
 
