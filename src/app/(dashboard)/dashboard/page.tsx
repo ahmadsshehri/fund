@@ -17,6 +17,7 @@ import {
   BarChart3, ArrowDownRight, ChevronLeft, AlertCircle, Database,
 } from 'lucide-react';
 import Link from 'next/link';
+import { rebuildLedgerFromScratch } from '@/lib/accounting';
 
 export default function DashboardPage() {
   const { user } = useAuth();
@@ -42,7 +43,23 @@ export default function DashboardPage() {
       setLoading(false);
     }
   };
-
+const handleRebuildLedger = async () => {
+  if (!user) {
+    alert('الرجاء تسجيل الدخول أولاً');
+    return;
+  }
+  if (!confirm('⚠️ تحذير: سيتم حذف كل حركات ledger الحالية وإعادة بنائها من رأس المال والاستثمارات والمصاريف. هل أنت متأكد؟')) return;
+  setMigrating(true);
+  try {
+    const result = await rebuildLedgerFromScratch(user.id);
+    alert(`✅ تم إعادة بناء ledger بالكامل!\nتم إنشاء ${result.created} حركة.\n${result.errors.length ? 'أخطاء: ' + result.errors.join(', ') : 'لا توجد أخطاء.'}`);
+    await load();
+  } catch (err) {
+    alert('خطأ أثناء إعادة البناء: ' + err);
+  } finally {
+    setMigrating(false);
+  }
+};
   const handleFixMissingData = async () => {
     if (!user) {
       alert('الرجاء تسجيل الدخول أولاً');
@@ -112,6 +129,9 @@ export default function DashboardPage() {
           </button>
           <button onClick={handleCheckLedger} className="btn-secondary" style={{ padding: '0.5rem 0.75rem' }}>
             فحص Ledger
+            <button onClick={handleRebuildLedger} className="btn-danger" style={{ padding: '0.5rem 0.75rem' }} disabled={migrating}>
+  إعادة بناء Ledger
+</button>
           </button>
           <button onClick={load} className="btn-secondary" style={{ padding: '0.5rem 0.75rem' }} disabled={loading}>
             <RefreshCw size={15} />
