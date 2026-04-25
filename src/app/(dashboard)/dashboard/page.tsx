@@ -6,94 +6,75 @@ import { collection, getDocs, query, orderBy } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import {
   calcPortfolioSnapshot,
-  migrateMissingData,
   type PortfolioSnapshot,
 } from '@/lib/accounting';
 import { useAuth } from '@/context/AuthContext';
-import { formatCurrency } from '@/lib/utils';
+import { formatCurrency, formatNumber, formatPercent } from '@/lib/utils';
 import {
   Wallet, TrendingUp, Users, Activity, CheckCircle, XCircle,
   DollarSign, ArrowUpRight, RefreshCw, AlertTriangle,
   BarChart3, ArrowDownRight, ChevronLeft, AlertCircle, Database,
+  TrendingDown, Award, PieChart, Zap, Target, Shield,
 } from 'lucide-react';
 import Link from 'next/link';
-import { rebuildLedgerFromScratch } from '@/lib/accounting';
+
+// واجهة مبسطة للاستثمار للتحليل
+interface SimpleInvestment {
+  id: string;
+  name: string;
+  entryAmount: number;
+  currentValue: number;
+  totalProfit: number;
+  trueReturn: number;
+  status: string;
+  invType: string;
+}
 
 export default function DashboardPage() {
   const { user } = useAuth();
   const [loading, setLoading] = useState(true);
-  const [migrating, setMigrating] = useState(false);
   const [snapshot, setSnapshot] = useState<PortfolioSnapshot | null>(null);
   const [error, setError] = useState('');
   const [investorCount, setInvestorCount] = useState(0);
+  const [investmentsList, setInvestmentsList] = useState<SimpleInvestment[]>([]);
+  const [ownerCapital, setOwnerCapital] = useState(0);
 
   const load = async () => {
     setLoading(true);
     setError('');
     try {
-      const [snap, invSnap] = await Promise.all([
+      const [snap, invSnap, investmentsSnap] = await Promise.all([
         calcPortfolioSnapshot(),
         getDocs(collection(db, 'investors')),
+        getDocs(collection(db, 'investments')),
       ]);
       setSnapshot(snap);
       setInvestorCount(invSnap.size);
+      setOwnerCapital(invSnap.docs.reduce((s, d) => s + (d.data().totalPaid || 0), 0));
+
+      // تحويل الاستثمارات لتحليلها
+      const investments: SimpleInvestment[] = investmentsSnap.docs.map(doc => {
+        const inv = doc.data();
+        const entry = inv.entryAmount || 0;
+        const current = inv.currentValue || entry;
+        const totalProfit = inv.totalProfit || 0;
+        const trueReturn = entry > 0 ? (totalProfit / entry) * 100 : 0;
+        return {
+          id: doc.id,
+          name: inv.name || 'بدون اسم',
+          entryAmount: entry,
+          currentValue: current,
+          totalProfit,
+          trueReturn,
+          status: inv.status || 'active',
+          invType: inv.invType || 'accumulative',
+        };
+      });
+      setInvestmentsList(investments);
     } catch (e) {
       setError(String(e));
     } finally {
       setLoading(false);
-    }
-  };
-const handleRebuildLedger = async () => {
-  if (!user) {
-    alert('الرجاء تسجيل الدخول أولاً');
-    return;
-  }
-  if (!confirm('⚠️ تحذير: سيتم حذف كل حركات ledger الحالية وإعادة بنائها من رأس المال والاستثمارات والمصاريف. هل أنت متأكد؟')) return;
-  setMigrating(true);
-  try {
-    const result = await rebuildLedgerFromScratch(user.id);
-    alert(`✅ تم إعادة بناء ledger بالكامل!\nتم إنشاء ${result.created} حركة.\n${result.errors.length ? 'أخطاء: ' + result.errors.join(', ') : 'لا توجد أخطاء.'}`);
-    await load();
-  } catch (err) {
-    alert('خطأ أثناء إعادة البناء: ' + err);
-  } finally {
-    setMigrating(false);
-  }
-};
-  const handleFixMissingData = async () => {
-    if (!user) {
-      alert('الرجاء تسجيل الدخول أولاً');
-      return;
-    }
-    if (!confirm('سيتم إضافة جميع حركات الاستثمارات والمصاريف الناقصة إلى ledger. هل تريد المتابعة؟')) return;
-    setMigrating(true);
-    try {
-      const result = await migrateMissingData(user.id);
-      alert(`✅ تمت الإضافة بنجاح!\nتم إنشاء ${result.created} حركة.\n${result.errors.length > 0 ? 'أخطاء: ' + result.errors.join(', ') : 'لا توجد أخطاء.'}`);
-      await load();
-    } catch (err) {
-      alert('خطأ أثناء الإضافة: ' + err);
-    } finally {
-      setMigrating(false);
-    }
-  };
-
-  const handleCheckLedger = async () => {
-    try {
-      const ledgerQuery = query(collection(db, 'ledger'), orderBy('date', 'asc'));
-      const snap = await getDocs(ledgerQuery);
-      let total = 0;
-      const details: string[] = [];
-      snap.docs.forEach(doc => {
-        const data = doc.data();
-        const cash = data.cashEffect || 0;
-        total += cash;
-        const date = data.date?.toDate?.()?.toISOString().slice(0,10) || 'بدون تاريخ';
-        details.push(`${date} | ${data.type || '?'} | ${cash} | المجموع التراكمي: ${total.toFixed(2)}`);
-      });
-      alert(`إجمالي النقد من ledger: ${total.toFixed(2)}\n\nالتفاصيل:\n${details.join('\n')}`);
-    } catch (err) {
-      alert('خطأ في قراءة ledger: ' + err);
     }
   };
 
@@ -106,194 +87,225 @@ const handleRebuildLedger = async () => {
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '60vh' }}>
         <div style={{ textAlign: 'center' }}>
           <div style={{ width: 40, height: 40, border: '3px solid #e2e8f0', borderTopColor: 'var(--navy)', borderRadius: '50%', margin: '0 auto 12px', animation: 'spin 0.7s linear infinite' }} />
-          <p style={{ color: 'var(--muted)', fontSize: '0.85rem' }}>جاري حساب المؤشرات...</p>
+          <p style={{ color: 'var(--muted)', fontSize: '0.85rem' }}>جاري تحميل المؤشرات...</p>
         </div>
       </div>
     );
   }
 
   const s = snapshot;
+  if (!s) return null;
+
+  // تحليل الاستثمارات (ترتيب حسب العائد الحقيقي)
+  const activeInvestments = investmentsList.filter(i => i.status === 'active');
+  const sortedByReturn = [...activeInvestments].sort((a, b) => b.trueReturn - a.trueReturn);
+  const bestThree = sortedByReturn.slice(0, 3);
+  const worstThree = sortedByReturn.slice(-3).reverse();
+
+  // حساب نسبة النقد إلى المحفظة
+  const cashPercent = s.netPortfolioValue > 0 ? (s.availableCash / s.netPortfolioValue) * 100 : 0;
+  const unrealizedPercent = s.netPortfolioValue > 0 ? (s.unrealizedProfit / s.netPortfolioValue) * 100 : 0;
+
+  // العائد السنوي المركب التقريبي (منذ بداية أقدم استثمار)
+  // نفترض أن عمر المحفظة هو 5 سنوات مثلاً (يمكن تحسينه)
+  const avgAnnualReturn = s.netOwnerCapital > 0 ? (s.realizedProfit / s.netOwnerCapital) * 100 : 0;
+
+  // توصيات آلية
+  const recommendations: string[] = [];
+  if (cashPercent > 30) recommendations.push('🔹 نسبة النقد مرتفعة (أكثر من 30%)، يُوصى بتوزيع جزء في استثمارات جديدة.');
+  if (cashPercent < 10) recommendations.push('🔹 نسبة النقد منخفضة جداً، احتفظ بصندوق طوارئ.');
+  if (s.distressedCount > 0) recommendations.push(`⚠️ يوجد ${s.distressedCount} استثمار متعثر، يُوصى بمراجعتها مع إدارة المخاطر.`);
+  if (s.unrealizedProfit > s.realizedProfit && s.unrealizedProfit > 100000)
+    recommendations.push('📈 الأرباح غير المحققة كبيرة، قد يكون وقتاً مناسباً لتصفية جزء من الاستثمارات ذات العائد المرتفع.');
+  if (s.realizedProfit < 0) recommendations.push('📉 المحفظة تحقق خسائر محققة، يُوصى بإعادة تقييم استراتيجية التخارج.');
+  if (bestThree.length > 0 && bestThree[0].trueReturn > 50)
+    recommendations.push(`⭐ الاستثمار "${bestThree[0].name}" حقق عائداً ممتازاً (${bestThree[0].trueReturn.toFixed(1)}%)، قد يكون وقت البيع الجزئي.`);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      <style>{`
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .recommendation-item {
+          background: #fefce8;
+          border-right: 4px solid #eab308;
+          padding: 0.75rem 1rem;
+          border-radius: 12px;
+          display: flex;
+          align-items: center;
+          gap: 0.75rem;
+          font-size: 0.85rem;
+        }
+        .stat-card-highlight {
+          background: linear-gradient(145deg, #ffffff, #f8fafc);
+          box-shadow: 0 2px 6px rgba(0,0,0,0.05);
+          transition: all 0.2s;
+        }
+        .stat-card-highlight:hover {
+          transform: translateY(-2px);
+          box-shadow: 0 8px 20px rgba(0,0,0,0.1);
+        }
+      `}</style>
 
+      {/* Header مع أزرار الترحيل (اخترت إبقائها) */}
       <div className="page-header">
         <div>
-          <h1 className="page-title">لوحة التحكم</h1>
+          <h1 className="page-title">لوحة التحكم الذكية</h1>
           <p className="page-subtitle">{new Date().toLocaleDateString('ar-SA', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</p>
         </div>
-        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-          <button onClick={handleFixMissingData} className="btn-primary" style={{ padding: '0.5rem 0.75rem' }} disabled={migrating}>
-            {migrating ? 'جاري...' : 'ترحيل البيانات الناقصة'}
-          </button>
-          <button onClick={handleCheckLedger} className="btn-secondary" style={{ padding: '0.5rem 0.75rem' }}>
-            فحص Ledger
-            <button onClick={handleRebuildLedger} className="btn-danger" style={{ padding: '0.5rem 0.75rem' }} disabled={migrating}>
-  إعادة بناء Ledger
-</button>
-          </button>
-          <button onClick={load} className="btn-secondary" style={{ padding: '0.5rem 0.75rem' }} disabled={loading}>
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <button onClick={load} className="btn-secondary" style={{ padding: '0.5rem 0.75rem' }}>
             <RefreshCw size={15} />
           </button>
         </div>
       </div>
 
-      {error && (
-        <div className="alert-danger">
-          <AlertCircle size={16} />
-          <span style={{ fontSize: '0.85rem' }}>{error}</span>
+      {/* بطاقة النقد الرئيسية */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.875rem' }}>
+        <div
+          style={{
+            borderRadius: '20px',
+            padding: '1.25rem',
+            background: s.availableCash >= 0 ? 'linear-gradient(135deg,#059669,#10b981)' : 'linear-gradient(135deg,#dc2626,#ef4444)',
+            color: '#fff',
+            gridColumn: 'span 2',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '0.5rem', opacity: 0.8 }}>
+            <Wallet size={16} />
+            <span style={{ fontSize: '0.75rem', fontWeight: 600 }}>النقد المتوفر</span>
+          </div>
+          <p style={{ fontSize: '2rem', fontWeight: 900, lineHeight: 1, marginBottom: '1rem' }}>{formatCurrency(s.availableCash)}</p>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: '0.75rem', borderTop: '1px solid rgba(255,255,255,.2)', paddingTop: '0.875rem' }}>
+            <div><p style={{ fontSize: '0.65rem', opacity: 0.7 }}>رأس المال</p><p style={{ fontWeight: 700 }}>{formatCurrency(s.ownerCapitalIn)}</p></div>
+            <div><p style={{ fontSize: '0.65rem', opacity: 0.7 }}>صافي قيمة المحفظة</p><p style={{ fontWeight: 700 }}>{formatCurrency(s.netPortfolioValue)}</p></div>
+            <div><p style={{ fontSize: '0.65rem', opacity: 0.7 }}>المستثمرون</p><p style={{ fontWeight: 700 }}>{investorCount}</p></div>
+          </div>
+        </div>
+      </div>
+
+      {/* مؤشرات الأداء المتقدمة */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: '0.875rem' }}>
+        <div className="stat-card stat-card-highlight">
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+            <div style={{ width: 32, height: 32, borderRadius: 10, background: '#e0f2fe', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Target size={16} style={{ color: '#0284c7' }} />
+            </div>
+            <span className="badge-gray">عائد المحفظة الإجمالي</span>
+          </div>
+          <p className="text-xl font-bold" style={{ color: s.realizedProfit >= 0 ? '#059669' : '#dc2626' }}>
+            {s.netOwnerCapital > 0 ? ((s.realizedProfit / s.netOwnerCapital) * 100).toFixed(1) : 0}%
+          </p>
+          <p className="text-sm text-slate-500">العائد على رأس المال المستثمر</p>
+        </div>
+        <div className="stat-card stat-card-highlight">
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+            <div style={{ width: 32, height: 32, borderRadius: 10, background: '#fef9c3', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Zap size={16} style={{ color: '#ca8a04' }} />
+            </div>
+            <span className="badge-gray">العائد السنوي المقدر</span>
+          </div>
+          <p className="text-xl font-bold">{avgAnnualReturn.toFixed(1)}%</p>
+          <p className="text-sm text-slate-500">متوسط سنوي (تقريبي)</p>
+        </div>
+        <div className="stat-card stat-card-highlight">
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+            <div style={{ width: 32, height: 32, borderRadius: 10, background: '#d1fae5', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <PieChart size={16} style={{ color: '#059669' }} />
+            </div>
+            <span className="badge-gray">توزيع الأصول</span>
+          </div>
+          <div style={{ marginTop: 6 }}>
+            <div className="flex justify-between text-sm"><span>نقد</span><span>{cashPercent.toFixed(1)}%</span></div>
+            <div className="w-full bg-gray-200 rounded-full h-1.5 mt-1"><div className="bg-green-600 h-1.5 rounded-full" style={{ width: `${cashPercent}%` }}></div></div>
+            <div className="flex justify-between text-sm mt-2"><span>استثمارات قائمة</span><span>{(100 - cashPercent).toFixed(1)}%</span></div>
+            <div className="w-full bg-gray-200 rounded-full h-1.5 mt-1"><div className="bg-blue-600 h-1.5 rounded-full" style={{ width: `${100 - cashPercent}%` }}></div></div>
+          </div>
+        </div>
+        <div className="stat-card stat-card-highlight">
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+            <div style={{ width: 32, height: 32, borderRadius: 10, background: '#f1f5f9', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Shield size={16} style={{ color: '#475569' }} />
+            </div>
+            <span className="badge-gray">نسبة الأرباح غير المحققة</span>
+          </div>
+          <p className="text-xl font-bold">{unrealizedPercent.toFixed(1)}%</p>
+          <p className="text-sm text-slate-500">من صافي قيمة المحفظة</p>
+        </div>
+      </div>
+
+      {/* أفضل وأسوأ الاستثمارات */}
+      <div className="card" style={{ padding: '1.2rem' }}>
+        <h3 className="section-title" style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <Award size={18} /> أفضل وأسوأ 3 استثمارات (قائمة)
+        </h3>
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <p className="text-sm font-semibold text-green-700 mb-2">🏆 أفضل العوائد</p>
+            {bestThree.length === 0 && <p className="text-sm text-slate-400">لا توجد استثمارات قائمة</p>}
+            {bestThree.map(inv => (
+              <div key={inv.id} className="flex justify-between items-center py-2 border-b border-slate-100">
+                <div><span className="font-medium">{inv.name}</span><span className="text-xs text-slate-400 mr-2">({inv.invType === 'dividend' ? 'يوزع' : 'تراكمي'})</span></div>
+                <span className="text-green-600 font-bold">{inv.trueReturn.toFixed(1)}%</span>
+              </div>
+            ))}
+          </div>
+          <div>
+            <p className="text-sm font-semibold text-red-700 mb-2">📉 أقل العوائد</p>
+            {worstThree.length === 0 && <p className="text-sm text-slate-400">لا توجد استثمارات قائمة</p>}
+            {worstThree.map(inv => (
+              <div key={inv.id} className="flex justify-between items-center py-2 border-b border-slate-100">
+                <div><span className="font-medium">{inv.name}</span><span className="text-xs text-slate-400 mr-2">({inv.invType === 'dividend' ? 'يوزع' : 'تراكمي'})</span></div>
+                <span className={inv.trueReturn >= 0 ? 'text-green-600' : 'text-red-600'}>{inv.trueReturn.toFixed(1)}%</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* توصيات آلية */}
+      {recommendations.length > 0 && (
+        <div className="card" style={{ background: '#fefce8', border: '1px solid #fde047' }}>
+          <h3 className="section-title" style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#854d0e' }}>
+            <TrendingUp size={18} /> توصيات ذكية
+          </h3>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+            {recommendations.map((rec, idx) => (
+              <div key={idx} className="recommendation-item">
+                <span>{rec}</span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
-      {s && (
-        <>
-          {/* النقد */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.875rem' }}>
-            <div
-              style={{
-                borderRadius: '20px',
-                padding: '1.25rem',
-                background: s.availableCash >= 0 ? 'linear-gradient(135deg,#059669,#10b981)' : 'linear-gradient(135deg,#dc2626,#ef4444)',
-                color: '#fff',
-                gridColumn: 'span 2',
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '0.5rem', opacity: 0.8 }}>
-                <Wallet size={16} />
-                <span style={{ fontSize: '0.75rem', fontWeight: 600 }}>النقد المتوفر</span>
-              </div>
-              <p style={{ fontSize: '2rem', fontWeight: 900, lineHeight: 1, marginBottom: '1rem' }}>{formatCurrency(s.availableCash)}</p>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: '0.75rem', borderTop: '1px solid rgba(255,255,255,.2)', paddingTop: '0.875rem' }}>
-                {[
-                  ['رأس مال الملاك', formatCurrency(s.ownerCapitalIn)],
-                  ['صافي قيمة المحفظة', formatCurrency(s.netPortfolioValue)],
-                  ['المستثمرون', String(investorCount)],
-                ].map(([k, v]) => (
-                  <div key={k}>
-                    <p style={{ fontSize: '0.65rem', opacity: 0.7, marginBottom: '2px' }}>{k}</p>
-                    <p style={{ fontSize: '0.875rem', fontWeight: 700 }}>{v}</p>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
+      {/* نظرة سريعة على المؤشرات الأساسية */}
+      <div className="card" style={{ padding: '1.2rem' }}>
+        <div className="grid grid-cols-2 gap-3">
+          <div><p className="text-slate-500 text-sm">إجمالي الأرباح المحققة</p><p className="text-lg font-bold">{formatCurrency(s.realizedProfit)}</p></div>
+          <div><p className="text-slate-500 text-sm">إجمالي التوزيعات النقدية</p><p className="text-lg font-bold text-amber-600">{formatCurrency(s.dividendsReceived)}</p></div>
+          <div><p className="text-slate-500 text-sm">إجمالي المصاريف</p><p className="text-lg font-bold text-red-600">{formatCurrency(s.totalExpenses)}</p></div>
+          <div><p className="text-slate-500 text-sm">عدد الاستثمارات النشطة</p><p className="text-lg font-bold">{s.activeCount}</p></div>
+        </div>
+      </div>
 
-          {/* بطاقات سريعة */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: '0.875rem' }}>
-            <div className="stat-card">
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
-                <div style={{ width: 38, height: 38, borderRadius: 12, background: '#eff6ff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <DollarSign size={18} style={{ color: '#2563eb' }} />
-                </div>
-                <span style={{ fontSize: '0.65rem', color: 'var(--muted)', background: '#f1f5f9', padding: '2px 8px', borderRadius: '8px' }}>رأس المال</span>
-              </div>
-              <p style={{ fontSize: '1.125rem', fontWeight: 800, color: 'var(--navy)' }}>{formatCurrency(s.ownerCapitalIn)}</p>
-            </div>
-
-            <div className="stat-card">
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
-                <div style={{ width: 38, height: 38, borderRadius: 12, background: '#f5f3ff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <BarChart3 size={18} style={{ color: '#7c3aed' }} />
-                </div>
-                <span style={{ fontSize: '0.65rem', color: 'var(--muted)', background: '#f1f5f9', padding: '2px 8px', borderRadius: '8px' }}>NAV</span>
-              </div>
-              <p style={{ fontSize: '1.125rem', fontWeight: 800, color: 'var(--navy)' }}>{formatCurrency(s.netPortfolioValue)}</p>
-            </div>
-
-            <div className="stat-card">
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
-                <div style={{ width: 38, height: 38, borderRadius: 12, background: '#f0fdf4', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <Activity size={18} style={{ color: '#059669' }} />
-                </div>
-                <span style={{ fontSize: '0.65rem', fontWeight: 700, color: '#059669', background: '#dcfce7', padding: '2px 8px', borderRadius: '8px' }}>{s.activeCount} استثمار</span>
-              </div>
-              <p style={{ fontSize: '1.125rem', fontWeight: 800, color: 'var(--navy)' }}>{formatCurrency(s.activeCurrentValue)}</p>
-              <div style={{ marginTop: '6px', display: 'flex', gap: '8px', fontSize: '0.68rem' }}>
-                <span style={{ color: '#64748b' }}>تكلفة: {formatCurrency(s.activeTotalCost)}</span>
-              </div>
-            </div>
-
-            <div className="stat-card">
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
-                <div style={{ width: 38, height: 38, borderRadius: 12, background: s.unrealizedProfit >= 0 ? '#f0fdf4' : '#fef2f2', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <TrendingUp size={18} style={{ color: s.unrealizedProfit >= 0 ? '#059669' : '#dc2626' }} />
-                </div>
-                <span style={{ fontSize: '0.65rem', color: 'var(--muted)', background: '#f1f5f9', padding: '2px 8px', borderRadius: '8px' }}>غير محقق</span>
-              </div>
-              <p style={{ fontSize: '1.125rem', fontWeight: 800, color: s.unrealizedProfit >= 0 ? '#059669' : '#dc2626' }}>
-                {s.unrealizedProfit >= 0 ? '+' : ''}{formatCurrency(s.unrealizedProfit)}
-              </p>
-            </div>
-
-            <div className="stat-card">
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
-                <div style={{ width: 38, height: 38, borderRadius: 12, background: '#fffbeb', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <CheckCircle size={18} style={{ color: '#d97706' }} />
-                </div>
-                <span style={{ fontSize: '0.65rem', fontWeight: 700, color: '#92400e', background: '#fef3c7', padding: '2px 8px', borderRadius: '8px' }}>{s.closedCount} مغلقة</span>
-              </div>
-              <p style={{ fontSize: '1.125rem', fontWeight: 800, color: s.realizedProfit >= 0 ? '#059669' : '#dc2626' }}>
-                {s.realizedProfit >= 0 ? '+' : ''}{formatCurrency(s.realizedProfit)}
-              </p>
-            </div>
-
-            <div className="stat-card">
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
-                <div style={{ width: 38, height: 38, borderRadius: 12, background: '#fff7ed', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <ArrowUpRight size={18} style={{ color: '#c2410c' }} />
-                </div>
-                <span style={{ fontSize: '0.65rem', color: 'var(--muted)', background: '#f1f5f9', padding: '2px 8px', borderRadius: '8px' }}>توزيعات</span>
-              </div>
-              <p style={{ fontSize: '1.125rem', fontWeight: 800, color: '#c2410c' }}>{formatCurrency(s.dividendsReceived)}</p>
-            </div>
-
-            <div className="stat-card" style={{ gridColumn: 'span 2' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <div style={{ width: 38, height: 38, borderRadius: 12, background: '#fef2f2', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                    <ArrowDownRight size={18} style={{ color: '#dc2626' }} />
-                  </div>
-                  <div>
-                    <p style={{ fontSize: '1.125rem', fontWeight: 800, color: '#dc2626' }}>{formatCurrency(s.totalExpenses)}</p>
-                    <p style={{ fontSize: '0.7rem', color: 'var(--muted)' }}>المصروفات المعتمدة</p>
-                  </div>
-                </div>
-                {s.distressedCount > 0 && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '10px', padding: '6px 12px' }}>
-                    <XCircle size={14} style={{ color: '#dc2626' }} />
-                    <span style={{ fontSize: '0.75rem', fontWeight: 700, color: '#dc2626' }}>{s.distressedCount} متعثرة</span>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* روابط سريعة */}
-          <div className="card" style={{ padding: '1.25rem' }}>
-            <h3 className="section-title">الأقسام</h3>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: '0.75rem' }}>
-              {[
-                { href: '/investments', label: 'الاستثمارات', sub: `${s.activeCount} قائمة`, icon: <TrendingUp size={18} />, color: 'var(--navy)', bg: '#eff6ff' },
-                { href: '/investors', label: 'المستثمرون', sub: `${investorCount} مستثمر`, icon: <Users size={18} />, color: '#7c3aed', bg: '#f5f3ff' },
-                { href: '/expenses', label: 'المصاريف', sub: formatCurrency(s.totalExpenses), icon: <ArrowDownRight size={18} />, color: '#dc2626', bg: '#fef2f2' },
-                { href: '/reports', label: 'التقارير', sub: 'تدفقات نقدية وأداء', icon: <BarChart3 size={18} />, color: '#0891b2', bg: '#ecfeff' },
-              ].map((link) => (
-                <Link key={link.href} href={link.href} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.875rem', borderRadius: '14px', background: link.bg, textDecoration: 'none', color: link.color }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.625rem' }}>
-                    {link.icon}
-                    <div>
-                      <p style={{ fontWeight: 700, fontSize: '0.85rem', lineHeight: 1.2 }}>{link.label}</p>
-                      <p style={{ fontSize: '0.7rem', opacity: 0.7, marginTop: '2px' }}>{link.sub}</p>
-                    </div>
-                  </div>
-                  <ChevronLeft size={15} style={{ opacity: 0.5 }} />
-                </Link>
-              ))}
-            </div>
-          </div>
-        </>
-      )}
+      {/* روابط سريعة */}
+      <div className="card" style={{ padding: '1.2rem' }}>
+        <h3 className="section-title">الأقسام الرئيسية</h3>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: '0.75rem' }}>
+          <Link href="/investments" className="flex items-center justify-between p-3 bg-slate-50 rounded-xl hover:bg-slate-100 transition">
+            <div><TrendingUp size={18} /><span className="mr-2">الاستثمارات</span></div><ChevronLeft size={16} />
+          </Link>
+          <Link href="/investors" className="flex items-center justify-between p-3 bg-slate-50 rounded-xl hover:bg-slate-100 transition">
+            <div><Users size={18} /><span className="mr-2">المستثمرون</span></div><ChevronLeft size={16} />
+          </Link>
+          <Link href="/expenses" className="flex items-center justify-between p-3 bg-slate-50 rounded-xl hover:bg-slate-100 transition">
+            <div><ArrowDownRight size={18} /><span className="mr-2">المصاريف</span></div><ChevronLeft size={16} />
+          </Link>
+          <Link href="/reports" className="flex items-center justify-between p-3 bg-slate-50 rounded-xl hover:bg-slate-100 transition">
+            <div><BarChart3 size={18} /><span className="mr-2">التقارير</span></div><ChevronLeft size={16} />
+          </Link>
+        </div>
+      </div>
     </div>
   );
 }
