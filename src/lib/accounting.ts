@@ -1,6 +1,6 @@
 /**
  * =========================================================
- * ACCOUNTING ENGINE — نظام المحاسبة الصحيح (النسخة النهائية)
+ * ACCOUNTING ENGINE — نظام المحاسبة الصحيح
  * =========================================================
  */
 
@@ -12,8 +12,6 @@ import {
   orderBy,
   where,
   Timestamp,
-  writeBatch,
-  doc,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 
@@ -51,6 +49,22 @@ export interface LedgerTransaction {
   createdAt?: Date;
 }
 
+export interface CashFlowStatement {
+  period: { from: Date; to: Date };
+  openingBalance: number;
+  capitalIn: number;
+  exitProceeds: number;
+  dividends: number;
+  operatingIncome: number;
+  expenseRefunds: number;
+  investmentFunding: number;
+  investmentTopups: number;
+  approvedExpenses: number;
+  ownerWithdrawals: number;
+  closingBalance: number;
+  netChange: number;
+}
+
 export interface PortfolioSnapshot {
   asOfDate: Date;
   ownerCapitalIn: number;
@@ -72,7 +86,7 @@ export interface PortfolioSnapshot {
   distressedCount: number;
 }
 
-// ─── Helper: إزالة undefined من الكائن ─────────────────────────────────────
+// ─── Helper: إزالة undefined ──────────────────────────────────────────────
 function cleanObject(obj: Record<string, any>): Record<string, any> {
   const result: Record<string, any> = {};
   for (const key in obj) {
@@ -240,26 +254,64 @@ export async function calcPortfolioSnapshot(asOfDate?: Date): Promise<PortfolioS
   };
 }
 
+// ─── Cash Flow Statement ─────────────────────────────────────────────────
+
+export async function getCashFlowStatement(from: Date, to: Date): Promise<CashFlowStatement> {
+  const allEntries = await getAllLedgerEntries();
+
+  const before = allEntries.filter((t) => t.date < from);
+  const during = allEntries.filter((t) => t.date >= from && t.date <= to);
+
+  const openingBalance = before.reduce((s, t) => s + (t.cashEffect || 0), 0);
+
+  const sum = (txs: LedgerTransaction[], types: TxType[], sign: 1 | -1 = 1) =>
+    txs
+      .filter((t) => types.includes(t.type))
+      .reduce((s, t) => s + Math.abs(t.cashEffect || 0) * sign, 0);
+
+  const capitalIn = sum(during, ['capital_in']);
+  const exitProceeds = sum(during, ['invest_partial_exit', 'invest_full_exit']);
+  const dividends = sum(during, ['invest_dividend']);
+  const operatingIncome = sum(during, ['operating_income']);
+  const expenseRefunds = sum(during, ['expense_refund']);
+  const investmentFunding = sum(during, ['invest_funding']);
+  const investmentTopups = sum(during, ['invest_topup']);
+  const approvedExpenses = sum(during, ['expense']);
+  const ownerWithdrawals = sum(during, ['capital_out']);
+
+  const netChange = during.reduce((s, t) => s + (t.cashEffect || 0), 0);
+  const closingBalance = openingBalance + netChange;
+
+  return {
+    period: { from, to },
+    openingBalance,
+    capitalIn,
+    exitProceeds,
+    dividends,
+    operatingIncome,
+    expenseRefunds,
+    investmentFunding,
+    investmentTopups,
+    approvedExpenses,
+    ownerWithdrawals,
+    closingBalance,
+    netChange,
+  };
+}
+
 // ─── Migration Helpers ─────────────────────────────────────────────────────
 
-/**
- * التحقق مما إذا كانت البيانات الأساسية (الاستثمارات والمصاريف) موجودة في ledger
- */
 export async function needsInvestmentMigration(): Promise<boolean> {
   const snap = await getDocs(
-    query(collection(db, 'ledger'), where('type', 'in', ['invest_funding', 'invest_dividend', 'expense']))
+    query(collection(db, 'ledger'), where('type', 'in', ['invest_funding', 'invest_dividend', 'expense'])),
   );
   return snap.empty;
 }
 
-/**
- * ترحيل البيانات القديمة إلى ledger (يمكن استخدامه يدوياً)
- */
 export async function migrateMissingData(userId: string): Promise<{ created: number; errors: string[] }> {
   let created = 0;
   const errors: string[] = [];
 
-  // جلب البيانات الحالية في ledger لتجنب التكرار
   const existingInvestments = new Set<string>();
   const existingExpenses = new Set<string>();
   const ledgerSnap = await getDocs(collection(db, 'ledger'));
@@ -269,14 +321,12 @@ export async function migrateMissingData(userId: string): Promise<{ created: num
     if (data.expenseId) existingExpenses.add(data.expenseId);
   });
 
-  // 1. ترحيل الاستثمارات
   const invSnap = await getDocs(collection(db, 'investments'));
   for (const d of invSnap.docs) {
     const inv = d.data();
     const invId = d.id;
     if (existingInvestments.has(invId)) continue;
 
-    // تمويل الدخول
     if (inv.entryAmount && inv.entryAmount > 0) {
       await addLedgerEntry({
         date: inv.entryDate?.toDate?.() ?? new Date(),
@@ -290,7 +340,6 @@ export async function migrateMissingData(userId: string): Promise<{ created: num
       created++;
     }
 
-    // أرباح موزعة
     for (const div of inv.dividends || []) {
       await addLedgerEntry({
         date: div.date?.toDate?.() ?? new Date(),
@@ -303,7 +352,6 @@ export async function migrateMissingData(userId: string): Promise<{ created: num
       created++;
     }
 
-    // إغلاق الاستثمار
     if (inv.status === 'closed' && inv.closingAmount && inv.closingAmount > 0) {
       await addLedgerEntry({
         date: inv.closingDate?.toDate?.() ?? new Date(),
@@ -319,7 +367,6 @@ export async function migrateMissingData(userId: string): Promise<{ created: num
     }
   }
 
-  // 2. ترحيل المصاريف
   const expSnap = await getDocs(collection(db, 'expenses'));
   for (const d of expSnap.docs) {
     const exp = d.data();
@@ -340,4 +387,181 @@ export async function migrateMissingData(userId: string): Promise<{ created: num
   }
 
   return { created, errors };
+}
+
+export async function needsMigration(): Promise<boolean> {
+  const snap = await getDocs(query(collection(db, 'ledger'), where('type', '==', 'capital_in')));
+  return snap.empty;
+}
+
+export async function migrateToLedger(userId: string): Promise<{ created: number; errors: string[] }> {
+  let created = 0;
+  const errors: string[] = [];
+
+  const alreadyHasData = await needsMigration();
+  if (!alreadyHasData) {
+    return { created: 0, errors: ['الترحيل غير مطلوب - ledger يحتوي بالفعل على بيانات'] };
+  }
+
+  try {
+    const invSnap = await getDocs(collection(db, 'investors'));
+    for (const d of invSnap.docs) {
+      const inv = d.data();
+      if (!inv.totalPaid || inv.totalPaid <= 0) continue;
+      await addLedgerEntry({
+        date: inv.joinDate?.toDate?.() ?? new Date(),
+        type: 'capital_in',
+        description: `رأس مال مُرحَّل: ${inv.name}`,
+        cashEffect: inv.totalPaid,
+        investorId: d.id,
+        createdBy: userId,
+      });
+      created++;
+    }
+  } catch (e) {
+    errors.push(`investors: ${e}`);
+  }
+
+  try {
+    const invstSnap = await getDocs(collection(db, 'investments'));
+    for (const d of invstSnap.docs) {
+      const inv = d.data();
+      if (!inv.entryAmount || inv.entryAmount <= 0) continue;
+
+      await addLedgerEntry({
+        date: inv.entryDate?.toDate?.() ?? new Date(),
+        type: 'invest_funding',
+        description: `استثمار مُرحَّل: ${inv.name || d.id}`,
+        cashEffect: -inv.entryAmount,
+        bookValueEffect: inv.entryAmount,
+        investmentId: d.id,
+        createdBy: userId,
+      });
+      created++;
+
+      for (const dv of inv.dividends || []) {
+        await addLedgerEntry({
+          date: dv.date?.toDate?.() ?? new Date(),
+          type: 'invest_dividend',
+          description: `توزيع مُرحَّل: ${inv.name || d.id}`,
+          cashEffect: dv.amount,
+          investmentId: d.id,
+          createdBy: userId,
+        });
+        created++;
+      }
+
+      if (inv.status === 'closed' && inv.closingAmount > 0) {
+        await addLedgerEntry({
+          date: inv.closingDate?.toDate?.() ?? new Date(),
+          type: 'invest_full_exit',
+          description: `إغلاق مُرحَّل: ${inv.name || d.id}`,
+          cashEffect: inv.closingAmount,
+          bookValueEffect: -inv.entryAmount,
+          realizedProfitEffect: inv.closingAmount - inv.entryAmount,
+          investmentId: d.id,
+          createdBy: userId,
+        });
+        created++;
+      }
+
+      for (const vu of inv.valueUpdates || []) {
+        await addLedgerEntry({
+          date: vu.date?.toDate?.() ?? new Date(),
+          type: 'invest_valuation',
+          description: `تقييم مُرحَّل: ${inv.name || d.id}`,
+          cashEffect: 0,
+          currentValueEffect: vu.newValue,
+          investmentId: d.id,
+          createdBy: userId,
+        });
+        created++;
+      }
+    }
+  } catch (e) {
+    errors.push(`investments: ${e}`);
+  }
+
+  try {
+    const expSnap = await getDocs(collection(db, 'expenses'));
+    for (const d of expSnap.docs) {
+      const exp = d.data();
+      if (exp.status !== 'approved' || !exp.amount) continue;
+      await addLedgerEntry({
+        date: exp.date?.toDate?.() ?? new Date(),
+        type: 'expense',
+        description: `مصروف مُرحَّل: ${exp.description}`,
+        cashEffect: -exp.amount,
+        expenseId: d.id,
+        investmentId: exp.investmentId,
+        createdBy: userId,
+      });
+      created++;
+    }
+  } catch (e) {
+    errors.push(`expenses: ${e}`);
+  }
+
+  return { created, errors };
+}
+
+// ─── Validation & Debug ───────────────────────────────────────────────────
+
+export async function validateLedger(): Promise<{ valid: boolean; issues: string[] }> {
+  const issues: string[] = [];
+  const allEntries = await getAllLedgerEntries();
+
+  const entriesWithoutDate = allEntries.filter((e) => !e.date);
+  if (entriesWithoutDate.length > 0) {
+    issues.push(`${entriesWithoutDate.length} حركة/حركات بدون تاريخ`);
+  }
+
+  const invalidCashEffect = allEntries.filter((e) => isNaN(e.cashEffect));
+  if (invalidCashEffect.length > 0) {
+    issues.push(`${invalidCashEffect.length} حركة/حركات بقيمة cashEffect غير رقمية`);
+  }
+
+  const totalCashEffect = allEntries.reduce((s, e) => s + (e.cashEffect || 0), 0);
+  const capitalIn = allEntries.filter((e) => e.type === 'capital_in').reduce((s, e) => s + (e.cashEffect || 0), 0);
+  const capitalOut = allEntries
+    .filter((e) => e.type === 'capital_out')
+    .reduce((s, e) => s + Math.abs(e.cashEffect || 0), 0);
+  const dividends = allEntries.filter((e) => e.type === 'invest_dividend').reduce((s, e) => s + (e.cashEffect || 0), 0);
+  const expenses = allEntries.filter((e) => e.type === 'expense').reduce((s, e) => s + Math.abs(e.cashEffect || 0), 0);
+
+  const calculatedCash = capitalIn - capitalOut + dividends - expenses;
+
+  if (Math.abs(totalCashEffect - calculatedCash) > 100) {
+    issues.push(`عدم تطابق في ledger: المجموع ${totalCashEffect} ≠ المحسوب ${calculatedCash}`);
+  }
+
+  return { valid: issues.length === 0, issues };
+}
+
+export async function debugLedger(): Promise<void> {
+  const entries = await getAllLedgerEntries();
+  console.log('=== LEDGER ENTRIES ===');
+  console.log(`Total entries: ${entries.length}`);
+  let totalCash = 0;
+  for (const e of entries) {
+    totalCash += e.cashEffect || 0;
+    console.log(
+      `${e.date.toISOString().slice(0, 10)} | ${e.type.padEnd(20)} | ${(e.cashEffect || 0).toFixed(2)} | ${totalCash.toFixed(2)} | ${e.description}`,
+    );
+  }
+  console.log(`Final Cash Balance: ${totalCash.toFixed(2)}`);
+}
+
+export async function debugPortfolio(): Promise<void> {
+  const snapshot = await calcPortfolioSnapshot();
+  console.log('=== PORTFOLIO SNAPSHOT ===');
+  console.log(`التاريخ: ${snapshot.asOfDate.toISOString().slice(0, 10)}`);
+  console.log(`رأس المال (داخل): ${snapshot.ownerCapitalIn.toFixed(2)}`);
+  console.log(`النقد المتوفر: ${snapshot.availableCash.toFixed(2)}`);
+  console.log(`قيمة القائمة: ${snapshot.activeCurrentValue.toFixed(2)}`);
+  console.log(`صافي قيمة المحفظة: ${snapshot.netPortfolioValue.toFixed(2)}`);
+  console.log(`أرباح محققة: ${snapshot.realizedProfit.toFixed(2)}`);
+  console.log(`أرباح غير محققة: ${snapshot.unrealizedProfit.toFixed(2)}`);
+  console.log(`توزيعات مستلمة: ${snapshot.dividendsReceived.toFixed(2)}`);
+  console.log(`مصاريف: ${snapshot.totalExpenses.toFixed(2)}`);
 }
