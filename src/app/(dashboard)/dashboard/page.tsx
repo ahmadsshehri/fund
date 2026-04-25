@@ -88,6 +88,24 @@ export default function DashboardPage() {
     }
   };
 
+  const handleRunMigration = async () => {
+    if (!user) {
+      alert('الرجاء تسجيل الدخول أولاً');
+      return;
+    }
+    if (!confirm('سيتم تحويل جميع البيانات (مستثمرين، استثمارات، مصاريف) إلى سجل الحركات ledger. هل تريد المتابعة؟')) return;
+    setMigrating(true);
+    try {
+      const result = await migrateToLedger(user.id);
+      alert(`✅ تم الترحيل بنجاح!\nتم إنشاء ${result.created} حركة.\n${result.errors.length > 0 ? 'أخطاء: ' + result.errors.join(', ') : 'لا توجد أخطاء.'}`);
+      await load();
+    } catch (err) {
+      alert('خطأ أثناء الترحيل: ' + err);
+    } finally {
+      setMigrating(false);
+    }
+  };
+
   useEffect(() => {
     load();
   }, []);
@@ -118,7 +136,10 @@ export default function DashboardPage() {
           <p className="page-subtitle">{new Date().toLocaleDateString('ar-SA', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</p>
         </div>
         <div style={{ display: 'flex', gap: '8px' }}>
-          <button onClick={handleCheckLedger} className="btn-secondary" style={{ padding: '0.5rem 0.75rem' }} title="فحص Ledger">
+          <button onClick={handleRunMigration} className="btn-primary" style={{ padding: '0.5rem 0.75rem' }} disabled={migrating}>
+            {migrating ? 'جاري...' : 'تشغيل الترحيل'}
+          </button>
+          <button onClick={handleCheckLedger} className="btn-secondary" style={{ padding: '0.5rem 0.75rem' }}>
             فحص Ledger
           </button>
           <button onClick={load} className="btn-secondary" style={{ padding: '0.5rem 0.75rem' }} disabled={loading}>
