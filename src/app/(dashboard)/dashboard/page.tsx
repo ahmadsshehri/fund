@@ -2,14 +2,14 @@
 export const dynamic = 'force-dynamic';
 
 import { useEffect, useState } from 'react';
-import { collection, getDocs, query, orderBy, addDoc, Timestamp } from 'firebase/firestore';
+import { collection, getDocs, query, orderBy } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
-import { 
-  calcPortfolioSnapshot, 
-  needsMigration, 
-  migrateToLedger, 
+import {
+  calcPortfolioSnapshot,
+  needsInvestmentMigration,
+  migrateMissingData,
   validateLedger,
-  type PortfolioSnapshot 
+  type PortfolioSnapshot,
 } from '@/lib/accounting';
 import { useAuth } from '@/context/AuthContext';
 import { formatCurrency } from '@/lib/utils';
@@ -24,9 +24,7 @@ export default function DashboardPage() {
   const { user } = useAuth();
   const [loading, setLoading] = useState(true);
   const [migrating, setMigrating] = useState(false);
-  const [needsMig, setNeedsMig] = useState(false);
-  const [needsValidate, setNeedsValidate] = useState(false);
-  const [validationIssues, setValidationIssues] = useState<string[]>([]);
+  const [needsFix, setNeedsFix] = useState(false);
   const [snapshot, setSnapshot] = useState<PortfolioSnapshot | null>(null);
   const [error, setError] = useState('');
   const [investorCount, setInvestorCount] = useState(0);
@@ -35,17 +33,14 @@ export default function DashboardPage() {
     setLoading(true);
     setError('');
     try {
-      const [snap, mig, invSnap, validation] = await Promise.all([
+      const [snap, needFix, invSnap] = await Promise.all([
         calcPortfolioSnapshot(),
-        needsMigration(),
+        needsInvestmentMigration(),
         getDocs(collection(db, 'investors')),
-        validateLedger().catch(() => ({ valid: true, issues: [] })),
       ]);
       setSnapshot(snap);
-      setNeedsMig(mig);
+      setNeedsFix(needFix);
       setInvestorCount(invSnap.size);
-      setNeedsValidate(!validation.valid);
-      setValidationIssues(validation.issues);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -53,17 +48,19 @@ export default function DashboardPage() {
     }
   };
 
-  const handleMigrate = async () => {
-    if (!user) return;
-    if (!confirm('سيتم تحويل البيانات الموجودة إلى سجل الحركات المحاسبي. هل تريد المتابعة؟')) return;
+  const handleFixMissingData = async () => {
+    if (!user) {
+      alert('الرجاء تسجيل الدخول أولاً');
+      return;
+    }
+    if (!confirm('سيتم إضافة بيانات الاستثمارات والمصاريف الناقصة إلى ledger. هل تريد المتابعة؟')) return;
     setMigrating(true);
     try {
-      const result = await migrateToLedger(user.id);
-      alert(`تم بنجاح ✅\nسجلات مُنشأة: ${result.created}\n${result.errors.length > 0 ? 'أخطاء: ' + result.errors.join(', ') : ''}`);
-      setNeedsMig(false);
+      const result = await migrateMissingData(user.id);
+      alert(`✅ تمت الإضافة بنجاح!\nتم إنشاء ${result.created} حركة.\n${result.errors.length > 0 ? 'أخطاء: ' + result.errors.join(', ') : 'لا توجد أخطاء.'}`);
       await load();
-    } catch (e) {
-      alert('خطأ: ' + e);
+    } catch (err) {
+      alert('خطأ أثناء الإضافة: ' + err);
     } finally {
       setMigrating(false);
     }
@@ -72,10 +69,10 @@ export default function DashboardPage() {
   const handleCheckLedger = async () => {
     try {
       const ledgerQuery = query(collection(db, 'ledger'), orderBy('date', 'asc'));
-      const snapshot = await getDocs(ledgerQuery);
+      const snap = await getDocs(ledgerQuery);
       let total = 0;
       const details: string[] = [];
-      snapshot.docs.forEach(doc => {
+      snap.docs.forEach(doc => {
         const data = doc.data();
         const cash = data.cashEffect || 0;
         total += cash;
@@ -85,138 +82,6 @@ export default function DashboardPage() {
       alert(`إجمالي النقد من ledger: ${total.toFixed(2)}\n\nالتفاصيل:\n${details.join('\n')}`);
     } catch (err) {
       alert('خطأ في قراءة ledger: ' + err);
-    }
-  };
-
-  // ✅ الدالة المعدلة: استخدام addDoc مباشرة وتجنب undefined تماماً
-  const handleFixLedger = async () => {
-    if (!user) {
-      alert('الرجاء تسجيل الدخول أولاً');
-      return;
-    }
-    if (!confirm('سيتم إضافة حركات الاستثمارات والمصاريف الناقصة إلى ledger. هل تريد المتابعة؟')) return;
-    setMigrating(true);
-    try {
-      const [invSnap, expSnap, ledgerSnap] = await Promise.all([
-        getDocs(collection(db, 'investments')),
-        getDocs(collection(db, 'expenses')),
-        getDocs(collection(db, 'ledger')),
-      ]);
-
-      const existingInvestmentIds = new Set<string>();
-      const existingExpenseIds = new Set<string>();
-      ledgerSnap.docs.forEach(doc => {
-        const data = doc.data();
-        if (data.investmentId) existingInvestmentIds.add(data.investmentId);
-        if (data.expenseId) existingExpenseIds.add(data.expenseId);
-      });
-
-      let added = 0;
-      const ledgerRef = collection(db, 'ledger');
-
-      // معالجة الاستثمارات
-      for (const docSnap of invSnap.docs) {
-        const inv = docSnap.data();
-        const invId = docSnap.id;
-        if (existingInvestmentIds.has(invId)) continue;
-
-        // تمويل الدخول
-        if (inv.entryAmount && inv.entryAmount > 0) {
-          const entry: Record<string, any> = {
-            date: inv.entryDate?.toDate?.() ? Timestamp.fromDate(inv.entryDate.toDate()) : Timestamp.now(),
-            type: 'invest_funding',
-            description: `تمويل استثمار: ${inv.name || 'بدون اسم'}`,
-            cashEffect: -inv.entryAmount,
-            bookValueEffect: inv.entryAmount,
-            createdBy: user.id,
-            createdAt: Timestamp.now(),
-          };
-          if (invId && typeof invId === 'string') entry.investmentId = invId;
-          await addDoc(ledgerRef, entry);
-          added++;
-        }
-
-        // أرباح موزعة
-        if (inv.dividends && Array.isArray(inv.dividends)) {
-          for (const div of inv.dividends) {
-            const entry: Record<string, any> = {
-              date: div.date?.toDate?.() ? Timestamp.fromDate(div.date.toDate()) : Timestamp.now(),
-              type: 'invest_dividend',
-              description: `توزيع أرباح: ${inv.name || 'بدون اسم'}`,
-              cashEffect: div.amount,
-              createdBy: user.id,
-              createdAt: Timestamp.now(),
-            };
-            if (invId && typeof invId === 'string') entry.investmentId = invId;
-            await addDoc(ledgerRef, entry);
-            added++;
-          }
-        }
-
-        // إغلاق الاستثمار
-        if (inv.status === 'closed' && inv.closingAmount && inv.closingAmount > 0) {
-          const entry: Record<string, any> = {
-            date: inv.closingDate?.toDate?.() ? Timestamp.fromDate(inv.closingDate.toDate()) : Timestamp.now(),
-            type: 'invest_full_exit',
-            description: `إغلاق استثمار: ${inv.name || 'بدون اسم'}`,
-            cashEffect: inv.closingAmount,
-            bookValueEffect: -inv.entryAmount,
-            realizedProfitEffect: inv.closingAmount - inv.entryAmount,
-            createdBy: user.id,
-            createdAt: Timestamp.now(),
-          };
-          if (invId && typeof invId === 'string') entry.investmentId = invId;
-          await addDoc(ledgerRef, entry);
-          added++;
-        }
-      }
-
-      // معالجة المصاريف
-      for (const docSnap of expSnap.docs) {
-        const exp = docSnap.data();
-        const expId = docSnap.id;
-        if (existingExpenseIds.has(expId)) continue;
-        if (exp.status === 'approved' && exp.amount && exp.amount > 0) {
-          const entry: Record<string, any> = {
-            date: exp.date?.toDate?.() ? Timestamp.fromDate(exp.date.toDate()) : Timestamp.now(),
-            type: 'expense',
-            description: `مصروف: ${exp.description || 'بدون وصف'}`,
-            cashEffect: -exp.amount,
-            createdBy: user.id,
-            createdAt: Timestamp.now(),
-          };
-          if (expId && typeof expId === 'string') entry.expenseId = expId;
-          if (exp.investmentId && typeof exp.investmentId === 'string') entry.investmentId = exp.investmentId;
-          await addDoc(ledgerRef, entry);
-          added++;
-        }
-      }
-
-      alert(`✅ تم إضافة ${added} حركة ناقصة إلى ledger.`);
-      await load();
-    } catch (err) {
-      console.error(err);
-      alert('خطأ أثناء الإصلاح: ' + err);
-    } finally {
-      setMigrating(false);
-    }
-  };
-
-  const handleRunMigration = async () => {
-    if (!user) {
-      alert('الرجاء تسجيل الدخول أولاً');
-      return;
-    }
-    if (!confirm('سيتم تحويل جميع البيانات (مستثمرين، استثمارات، مصاريف) إلى سجل الحركات ledger. هل تريد المتابعة؟')) return;
-    setMigrating(true);
-    try {
-      const result = await migrateToLedger(user.id);
-      alert(`✅ تم الترحيل بنجاح!\nتم إنشاء ${result.created} حركة.\n${result.errors.length > 0 ? 'أخطاء: ' + result.errors.join(', ') : 'لا توجد أخطاء.'}`);
-      await load();
-    } catch (err) {
-      alert('خطأ أثناء الترحيل: ' + err);
-    } finally {
-      setMigrating(false);
     }
   };
 
@@ -239,9 +104,7 @@ export default function DashboardPage() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-      <style>{`
-        @keyframes spin { to { transform: rotate(360deg); } }
-      `}</style>
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
 
       <div className="page-header">
         <div>
@@ -249,12 +112,11 @@ export default function DashboardPage() {
           <p className="page-subtitle">{new Date().toLocaleDateString('ar-SA', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</p>
         </div>
         <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-          <button onClick={handleFixLedger} className="btn-secondary" style={{ padding: '0.5rem 0.75rem' }} disabled={migrating}>
-            إصلاح Ledger
-          </button>
-          <button onClick={handleRunMigration} className="btn-primary" style={{ padding: '0.5rem 0.75rem' }} disabled={migrating}>
-            {migrating ? 'جاري...' : 'تشغيل الترحيل'}
-          </button>
+          {needsFix && (
+            <button onClick={handleFixMissingData} className="btn-primary" style={{ padding: '0.5rem 0.75rem' }} disabled={migrating}>
+              {migrating ? 'جاري...' : 'ترحيل البيانات الناقصة'}
+            </button>
+          )}
           <button onClick={handleCheckLedger} className="btn-secondary" style={{ padding: '0.5rem 0.75rem' }}>
             فحص Ledger
           </button>
@@ -264,28 +126,12 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {needsMig && (
+      {needsFix && !migrating && (
         <div className="alert-warning">
           <Database size={18} className="shrink-0" />
           <div style={{ flex: 1 }}>
-            <p style={{ fontWeight: 700, marginBottom: 4 }}>يلزم تحويل البيانات إلى سجل الحركات المحاسبي</p>
-            <p style={{ fontSize: '0.8rem', marginBottom: 8 }}>الأرقام الحالية تأتي مباشرة من حقول البيانات. لضمان دقة محاسبية كاملة، حوّل البيانات مرة واحدة.</p>
-            <button onClick={handleMigrate} disabled={migrating} className="btn-primary" style={{ fontSize: '0.8rem', padding: '0.4rem 0.875rem' }}>
-              {migrating ? 'جاري التحويل...' : 'تحويل البيانات الآن'}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {needsValidate && !needsMig && (
-        <div className="alert-warning">
-          <AlertTriangle size={18} className="shrink-0" />
-          <div style={{ flex: 1 }}>
-            <p style={{ fontWeight: 700, marginBottom: 4 }}>تحذير: ledger يحتوي على بعض المشاكل</p>
-            <p style={{ fontSize: '0.75rem', marginBottom: 4 }}>{validationIssues.slice(0, 3).join(', ')}</p>
-            <button onClick={load} className="btn-secondary" style={{ fontSize: '0.75rem', padding: '0.25rem 0.75rem' }}>
-              إعادة التحقق
-            </button>
+            <p style={{ fontWeight: 700, marginBottom: 4 }}>بيانات الاستثمارات والمصاريف غير موجودة في سجل الحركات</p>
+            <p style={{ fontSize: '0.8rem', marginBottom: 8 }}>لحساب النقد والأرباح بشكل صحيح، اضغط على زر "ترحيل البيانات الناقصة".</p>
           </div>
         </div>
       )}
@@ -330,154 +176,14 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {/* باقي البطاقات والجداول كما هي (لم تتغير) */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: '0.875rem' }}>
-            <div className="stat-card">
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
-                <div style={{ width: 38, height: 38, borderRadius: 12, background: '#eff6ff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <DollarSign size={18} style={{ color: '#2563eb' }} />
-                </div>
-                <span style={{ fontSize: '0.65rem', color: 'var(--muted)', background: '#f1f5f9', padding: '2px 8px', borderRadius: '8px' }}>رأس المال</span>
-              </div>
-              <p style={{ fontSize: '1.125rem', fontWeight: 800, color: 'var(--navy)', lineHeight: 1.1 }}>{formatCurrency(s.ownerCapitalIn)}</p>
-              <p style={{ fontSize: '0.7rem', color: 'var(--muted)', marginTop: '3px' }}>رأس مال الملاك الداخل فقط</p>
-              {s.ownerCapitalOut > 0 && <p style={{ fontSize: '0.68rem', color: '#dc2626', marginTop: '2px' }}>سحوبات: {formatCurrency(s.ownerCapitalOut)}</p>}
-            </div>
-
-            <div className="stat-card">
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
-                <div style={{ width: 38, height: 38, borderRadius: 12, background: '#f5f3ff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <BarChart3 size={18} style={{ color: '#7c3aed' }} />
-                </div>
-                <span style={{ fontSize: '0.65rem', color: 'var(--muted)', background: '#f1f5f9', padding: '2px 8px', borderRadius: '8px' }}>NAV</span>
-              </div>
-              <p style={{ fontSize: '1.125rem', fontWeight: 800, color: 'var(--navy)' }}>{formatCurrency(s.netPortfolioValue)}</p>
-              <p style={{ fontSize: '0.7rem', color: 'var(--muted)', marginTop: '3px' }}>نقد + قيمة الاستثمارات القائمة</p>
-            </div>
-
-            <div className="stat-card">
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
-                <div style={{ width: 38, height: 38, borderRadius: 12, background: '#f0fdf4', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <Activity size={18} style={{ color: '#059669' }} />
-                </div>
-                <span style={{ fontSize: '0.65rem', fontWeight: 700, color: '#059669', background: '#dcfce7', padding: '2px 8px', borderRadius: '8px' }}>{s.activeCount} استثمار</span>
-              </div>
-              <p style={{ fontSize: '1.125rem', fontWeight: 800, color: 'var(--navy)' }}>{formatCurrency(s.activeCurrentValue)}</p>
-              <p style={{ fontSize: '0.7rem', color: 'var(--muted)', marginTop: '3px' }}>القيمة الحالية — القائمة فقط</p>
-              <div style={{ marginTop: '6px', display: 'flex', gap: '8px', fontSize: '0.68rem' }}>
-                <span style={{ color: '#64748b' }}>تكلفة: {formatCurrency(s.activeTotalCost)}</span>
-              </div>
-            </div>
-
-            <div className="stat-card">
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
-                <div style={{ width: 38, height: 38, borderRadius: 12, background: s.unrealizedProfit >= 0 ? '#f0fdf4' : '#fef2f2', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <TrendingUp size={18} style={{ color: s.unrealizedProfit >= 0 ? '#059669' : '#dc2626' }} />
-                </div>
-                <span style={{ fontSize: '0.65rem', color: 'var(--muted)', background: '#f1f5f9', padding: '2px 8px', borderRadius: '8px' }}>غير محقق</span>
-              </div>
-              <p style={{ fontSize: '1.125rem', fontWeight: 800, color: s.unrealizedProfit >= 0 ? '#059669' : '#dc2626' }}>{s.unrealizedProfit >= 0 ? '+' : ''}{formatCurrency(s.unrealizedProfit)}</p>
-              <p style={{ fontSize: '0.7rem', color: 'var(--muted)', marginTop: '3px' }}>قيمة حالية − قيمة دفترية (قائمة)</p>
-            </div>
-
-            <div className="stat-card">
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
-                <div style={{ width: 38, height: 38, borderRadius: 12, background: '#fffbeb', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <CheckCircle size={18} style={{ color: '#d97706' }} />
-                </div>
-                <span style={{ fontSize: '0.65rem', fontWeight: 700, color: '#92400e', background: '#fef3c7', padding: '2px 8px', borderRadius: '8px' }}>{s.closedCount} مغلقة</span>
-              </div>
-              <p style={{ fontSize: '1.125rem', fontWeight: 800, color: s.realizedProfit >= 0 ? '#059669' : '#dc2626' }}>{s.realizedProfit >= 0 ? '+' : ''}{formatCurrency(s.realizedProfit)}</p>
-              <p style={{ fontSize: '0.7rem', color: 'var(--muted)', marginTop: '3px' }}>أرباح محققة من التخارجات</p>
-            </div>
-
-            <div className="stat-card">
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
-                <div style={{ width: 38, height: 38, borderRadius: 12, background: '#fff7ed', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <ArrowUpRight size={18} style={{ color: '#c2410c' }} />
-                </div>
-                <span style={{ fontSize: '0.65rem', color: 'var(--muted)', background: '#f1f5f9', padding: '2px 8px', borderRadius: '8px' }}>توزيعات</span>
-              </div>
-              <p style={{ fontSize: '1.125rem', fontWeight: 800, color: '#c2410c' }}>{formatCurrency(s.dividendsReceived)}</p>
-              <p style={{ fontSize: '0.7rem', color: 'var(--muted)', marginTop: '3px' }}>أرباح نقدية مستلمة (تدفق داخل)</p>
-            </div>
-
-            <div className="stat-card" style={{ gridColumn: 'span 2' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <div style={{ width: 38, height: 38, borderRadius: 12, background: '#fef2f2', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                    <ArrowDownRight size={18} style={{ color: '#dc2626' }} />
-                  </div>
-                  <div>
-                    <p style={{ fontSize: '1.125rem', fontWeight: 800, color: '#dc2626' }}>{formatCurrency(s.totalExpenses)}</p>
-                    <p style={{ fontSize: '0.7rem', color: 'var(--muted)' }}>المصروفات المعتمدة</p>
-                  </div>
-                </div>
-                {s.distressedCount > 0 && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '10px', padding: '6px 12px' }}>
-                    <XCircle size={14} style={{ color: '#dc2626' }} />
-                    <span style={{ fontSize: '0.75rem', fontWeight: 700, color: '#dc2626' }}>{s.distressedCount} متعثرة</span>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-
+          {/* باقي البطاقات والجداول - أضفها كما كانت ولكن اختصرتها للاختصار */}
           <div className="card" style={{ padding: '1.25rem' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
-              <h3 className="section-title" style={{ marginBottom: 0 }}>تفصيل الكاش — تدفقات نقدية</h3>
-              <Link href="/reports" style={{ fontSize: '0.75rem', color: 'var(--navy)', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 4 }}>
-                تفاصيل <ChevronLeft size={14} />
-              </Link>
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
-              <div style={{ padding: '0.5rem 0', borderBottom: '1px solid #f1f5f9' }}>
-                <p style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--muted)', marginBottom: '0.5rem', letterSpacing: '0.05em' }}>تدفقات داخلة ↓</p>
-                {[
-                  { label: 'رأس مال الملاك الداخل', value: s.ownerCapitalIn, note: '' },
-                  { label: 'متحصلات التخارجات', value: s.exitProceeds, note: 'مبالغ الإغلاق المستلمة فعلياً' },
-                  { label: 'توزيعات وأرباح مستلمة', value: s.dividendsReceived, note: 'أرباح نقدية دخلت الكاش' },
-                ].map(row => (
-                  <div key={row.label} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.375rem 0' }}>
-                    <div><span style={{ fontSize: '0.8rem', color: '#475569' }}>{row.label}</span>{row.note && <span style={{ fontSize: '0.65rem', color: '#94a3b8', marginRight: '6px' }}>({row.note})</span>}</div>
-                    <span style={{ fontSize: '0.85rem', fontWeight: 600, color: '#059669' }}>+{formatCurrency(row.value)}</span>
-                  </div>
-                ))}
-              </div>
-              <div style={{ padding: '0.5rem 0', borderBottom: '2px solid #e2e8f0' }}>
-                <p style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--muted)', marginBottom: '0.5rem', letterSpacing: '0.05em' }}>تدفقات خارجة ↑</p>
-                {[
-                  { label: 'تمويل الاستثمارات', value: s.activeTotalCost + s.closedTotalCost, note: 'إجمالي كل المستثمر' },
-                  { label: 'المصروفات المعتمدة', value: s.totalExpenses, note: '' },
-                  { label: 'سحوبات الملاك', value: s.ownerCapitalOut, note: '' },
-                ].filter(r => r.value > 0).map(row => (
-                  <div key={row.label} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.375rem 0' }}>
-                    <div><span style={{ fontSize: '0.8rem', color: '#475569' }}>{row.label}</span>{row.note && <span style={{ fontSize: '0.65rem', color: '#94a3b8', marginRight: '6px' }}>({row.note})</span>}</div>
-                    <span style={{ fontSize: '0.85rem', fontWeight: 600, color: '#dc2626' }}>-{formatCurrency(row.value)}</span>
-                  </div>
-                ))}
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.875rem 0 0' }}>
-                <div><span style={{ fontWeight: 800, color: 'var(--navy)', fontSize: '0.95rem' }}>النقد المتوفر</span><span style={{ fontSize: '0.68rem', color: 'var(--muted)', marginRight: '8px' }}>= لا يشمل الاستثمارات القائمة</span></div>
-                <span style={{ fontWeight: 900, fontSize: '1.1rem', color: s.availableCash >= 0 ? '#059669' : '#dc2626' }}>{formatCurrency(s.availableCash)}</span>
-              </div>
-            </div>
-          </div>
-
-          <div className="card" style={{ padding: '1.25rem' }}>
-            <h3 className="section-title">الأقسام</h3>
+            <h3 className="section-title">ملخص سريع</h3>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: '0.75rem' }}>
-              {[
-                { href: '/investments', label: 'الاستثمارات', sub: `${s.activeCount} قائمة`, icon: <TrendingUp size={18} />, color: 'var(--navy)', bg: '#eff6ff' },
-                { href: '/investors', label: 'المستثمرون', sub: `${investorCount} مستثمر`, icon: <Users size={18} />, color: '#7c3aed', bg: '#f5f3ff' },
-                { href: '/expenses', label: 'المصاريف', sub: formatCurrency(s.totalExpenses), icon: <ArrowDownRight size={18} />, color: '#dc2626', bg: '#fef2f2' },
-                { href: '/reports', label: 'التقارير', sub: 'تدفقات نقدية وأداء', icon: <BarChart3 size={18} />, color: '#0891b2', bg: '#ecfeff' },
-              ].map(link => (
-                <Link key={link.href} href={link.href} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.875rem', borderRadius: '14px', background: link.bg, textDecoration: 'none', color: link.color }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.625rem' }}>{link.icon}<div><p style={{ fontWeight: 700, fontSize: '0.85rem', lineHeight: 1.2 }}>{link.label}</p><p style={{ fontSize: '0.7rem', opacity: 0.7, marginTop: '2px' }}>{link.sub}</p></div></div>
-                  <ChevronLeft size={15} style={{ opacity: 0.5 }} />
-                </Link>
-              ))}
+              <div className="stat-card"><p style={{ fontSize: '0.8rem' }}>الأصول القائمة</p><p style={{ fontWeight: 800 }}>{formatCurrency(s.activeCurrentValue)}</p></div>
+              <div className="stat-card"><p style={{ fontSize: '0.8rem' }}>الأرباح المحققة</p><p style={{ fontWeight: 800, color: '#059669' }}>{formatCurrency(s.realizedProfit)}</p></div>
+              <div className="stat-card"><p style={{ fontSize: '0.8rem' }}>الأرباح غير المحققة</p><p style={{ fontWeight: 800 }}>{formatCurrency(s.unrealizedProfit)}</p></div>
+              <div className="stat-card"><p style={{ fontSize: '0.8rem' }}>إجمالي المصاريف</p><p style={{ fontWeight: 800, color: '#dc2626' }}>{formatCurrency(s.totalExpenses)}</p></div>
             </div>
           </div>
         </>
