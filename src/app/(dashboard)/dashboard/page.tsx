@@ -112,7 +112,6 @@ export default function DashboardPage() {
             <div style={{ display:'flex', alignItems:'center', gap:'8px', marginBottom:'0.5rem', opacity:.8 }}>
               <Wallet size={16} />
               <span style={{ fontSize:'0.75rem', fontWeight:600 }}>النقد المتوفر</span>
-              {!needsMig && <span style={{ fontSize:'0.65rem', background:'rgba(255,255,255,.2)', padding:'2px 8px', borderRadius:'8px', marginRight:'auto' }}>من سجل الحركات ✓</span>}
             </div>
             <p style={{ fontSize:'2rem',fontWeight:900,lineHeight:1,marginBottom:'1rem' }}>{formatCurrency(s.availableCash)}</p>
             <div style={{ display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'0.75rem', borderTop:'1px solid rgba(255,255,255,.2)', paddingTop:'0.875rem' }}>
