@@ -2,7 +2,7 @@
 export const dynamic = 'force-dynamic';
 
 import { useEffect, useState } from 'react';
-import { collection, getDocs } from 'firebase/firestore';
+import { collection, getDocs, query, orderBy } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { 
   calcPortfolioSnapshot, 
@@ -69,6 +69,25 @@ export default function DashboardPage() {
     }
   };
 
+  const handleCheckLedger = async () => {
+    try {
+      const ledgerQuery = query(collection(db, 'ledger'), orderBy('date', 'asc'));
+      const snapshot = await getDocs(ledgerQuery);
+      let total = 0;
+      const details: string[] = [];
+      snapshot.docs.forEach(doc => {
+        const data = doc.data();
+        const cash = data.cashEffect || 0;
+        total += cash;
+        const date = data.date?.toDate?.()?.toISOString().slice(0,10) || 'بدون تاريخ';
+        details.push(`${date} | ${data.type || '?'} | ${cash} | المجموع التراكمي: ${total.toFixed(2)}`);
+      });
+      alert(`إجمالي النقد من ledger: ${total.toFixed(2)}\n\nالتفاصيل:\n${details.join('\n')}`);
+    } catch (err) {
+      alert('خطأ في قراءة ledger: ' + err);
+    }
+  };
+
   useEffect(() => {
     load();
   }, []);
@@ -98,9 +117,14 @@ export default function DashboardPage() {
           <h1 className="page-title">لوحة التحكم</h1>
           <p className="page-subtitle">{new Date().toLocaleDateString('ar-SA', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</p>
         </div>
-        <button onClick={load} className="btn-secondary" style={{ padding: '0.5rem 0.75rem' }} disabled={loading}>
-          <RefreshCw size={15} />
-        </button>
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <button onClick={handleCheckLedger} className="btn-secondary" style={{ padding: '0.5rem 0.75rem' }} title="فحص Ledger">
+            فحص Ledger
+          </button>
+          <button onClick={load} className="btn-secondary" style={{ padding: '0.5rem 0.75rem' }} disabled={loading}>
+            <RefreshCw size={15} />
+          </button>
+        </div>
       </div>
 
       {/* Migration notice */}
