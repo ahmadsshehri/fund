@@ -565,3 +565,128 @@ export async function debugPortfolio(): Promise<void> {
   console.log(`توزيعات مستلمة: ${snapshot.dividendsReceived.toFixed(2)}`);
   console.log(`مصاريف: ${snapshot.totalExpenses.toFixed(2)}`);
 }
+import { writeBatch } from 'firebase/firestore'; // تأكد من وجود هذا الاستيراد
+
+/**
+ * إعادة بناء دفتر الأستاذ (ledger) بالكامل من البيانات الأساسية
+ * - يحذف جميع وثائق ledger الموجودة مسبقاً
+ * - ينشئ حركات رأس المال من المستثمرين
+ * - ينشئ حركات تمويل الاستثمارات والأرباح والإغلاق
+ * - ينشئ حركات المصاريف المعتمدة
+ */
+export async function rebuildLedgerFromScratch(userId: string): Promise<{ created: number; errors: string[] }> {
+  let created = 0;
+  const errors: string[] = [];
+
+  // 1. حذف جميع وثائق ledger الحالية
+  try {
+    const existing = await getDocs(collection(db, 'ledger'));
+    const batch = writeBatch(db);
+    existing.docs.forEach((doc) => batch.delete(doc.ref));
+    await batch.commit();
+    console.log('✅ تم حذف ledger القديم');
+  } catch (e) {
+    errors.push(`فشل حذف ledger: ${e}`);
+  }
+
+  // 2. رأس المال من المستثمرين
+  try {
+    const investorsSnap = await getDocs(collection(db, 'investors'));
+    for (const doc of investorsSnap.docs) {
+      const inv = doc.data();
+      const amount = inv.totalPaid;
+      if (amount && amount > 0) {
+        await addLedgerEntry({
+          date: inv.joinDate?.toDate?.() ?? new Date(),
+          type: 'capital_in',
+          description: `رأس مال: ${inv.name || 'مستثمر'}`,
+          cashEffect: amount,
+          investorId: doc.id,
+          createdBy: userId,
+        });
+        created++;
+      }
+    }
+  } catch (e) {
+    errors.push(`رأس المال: ${e}`);
+  }
+
+  // 3. الاستثمارات (تمويل + أرباح + إغلاق)
+  try {
+    const investmentsSnap = await getDocs(collection(db, 'investments'));
+    for (const doc of investmentsSnap.docs) {
+      const inv = doc.data();
+      const invId = doc.id;
+      const entryAmount = inv.entryAmount;
+
+      // تمويل الدخول
+      if (entryAmount && entryAmount > 0) {
+        await addLedgerEntry({
+          date: inv.entryDate?.toDate?.() ?? new Date(),
+          type: 'invest_funding',
+          description: `تمويل استثمار: ${inv.name || invId}`,
+          cashEffect: -entryAmount,
+          bookValueEffect: entryAmount,
+          investmentId: invId,
+          createdBy: userId,
+        });
+        created++;
+      }
+
+      // الأرباح الموزعة
+      const dividends = inv.dividends || [];
+      for (const div of dividends) {
+        await addLedgerEntry({
+          date: div.date?.toDate?.() ?? new Date(),
+          type: 'invest_dividend',
+          description: `توزيع أرباح: ${inv.name || invId}`,
+          cashEffect: div.amount,
+          investmentId: invId,
+          createdBy: userId,
+        });
+        created++;
+      }
+
+      // إغلاق الاستثمار
+      if (inv.status === 'closed' && inv.closingAmount && inv.closingAmount > 0) {
+        await addLedgerEntry({
+          date: inv.closingDate?.toDate?.() ?? new Date(),
+          type: 'invest_full_exit',
+          description: `إغلاق استثمار: ${inv.name || invId}`,
+          cashEffect: inv.closingAmount,
+          bookValueEffect: -entryAmount,
+          realizedProfitEffect: inv.closingAmount - entryAmount,
+          investmentId: invId,
+          createdBy: userId,
+        });
+        created++;
+      }
+    }
+  } catch (e) {
+    errors.push(`الاستثمارات: ${e}`);
+  }
+
+  // 4. المصاريف المعتمدة
+  try {
+    const expensesSnap = await getDocs(collection(db, 'expenses'));
+    for (const doc of expensesSnap.docs) {
+      const exp = doc.data();
+      if (exp.status === 'approved' && exp.amount && exp.amount > 0) {
+        await addLedgerEntry({
+          date: exp.date?.toDate?.() ?? new Date(),
+          type: 'expense',
+          description: `مصروف: ${exp.description || 'بدون وصف'}`,
+          cashEffect: -exp.amount,
+          expenseId: doc.id,
+          investmentId: exp.investmentId || undefined,
+          createdBy: userId,
+        });
+        created++;
+      }
+    }
+  } catch (e) {
+    errors.push(`المصاريف: ${e}`);
+  }
+
+  return { created, errors };
+}
