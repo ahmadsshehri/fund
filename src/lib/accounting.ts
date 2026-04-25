@@ -1,6 +1,7 @@
 /**
  * =========================================================
  * ACCOUNTING ENGINE — نظام المحاسبة الصحيح
+ * يدعم الاستثمارات المتعثرة عبر حركات impairment
  * =========================================================
  */
 
@@ -12,6 +13,7 @@ import {
   orderBy,
   where,
   Timestamp,
+  writeBatch,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 
@@ -215,6 +217,7 @@ export async function calcPortfolioSnapshot(asOfDate?: Date): Promise<PortfolioS
     const divs = (inv.dividends || []).reduce((s: number, d: { amount: number }) => s + d.amount, 0);
 
     if (!isClosed) {
+      // active أو distressed, كلاهما قائم ولكن بقيمته الحالية
       const cv = inv.currentValue || entryAmt;
       activeTotalCost += entryAmt;
       activeCurrentValue += cv;
@@ -299,7 +302,141 @@ export async function getCashFlowStatement(from: Date, to: Date): Promise<CashFl
   };
 }
 
-// ─── Migration Helpers ─────────────────────────────────────────────────────
+// ─── Recording Functions (including impairment) ─────────────────────────
+
+export async function recordImpairment(
+  investmentId: string,
+  investmentName: string,
+  oldBookValue: number,
+  newCurrentValue: number,
+  date: Date,
+  userId: string,
+): Promise<void> {
+  const impairmentLoss = oldBookValue - newCurrentValue;
+  await addLedgerEntry({
+    date,
+    type: 'invest_impairment',
+    description: `هبوط قيمة الاستثمار: ${investmentName}`,
+    cashEffect: 0,
+    bookValueEffect: -impairmentLoss,
+    currentValueEffect: newCurrentValue,
+    investmentId,
+    createdBy: userId,
+  });
+}
+
+// دوال التسجيل الأخرى (مختصرة لكنها موجودة في الإصدار السابق)
+export async function recordInvestmentFunding(
+  investmentId: string,
+  investmentName: string,
+  amount: number,
+  date: Date,
+  userId: string,
+): Promise<void> {
+  await addLedgerEntry({
+    date,
+    type: 'invest_funding',
+    description: `تمويل استثمار: ${investmentName}`,
+    cashEffect: -amount,
+    bookValueEffect: amount,
+    investmentId,
+    createdBy: userId,
+  });
+}
+
+export async function recordInvestmentExit(
+  investmentId: string,
+  investmentName: string,
+  originalCost: number,
+  exitProceeds: number,
+  date: Date,
+  userId: string,
+): Promise<void> {
+  const realizedProfit = exitProceeds - originalCost;
+  await addLedgerEntry({
+    date,
+    type: 'invest_full_exit',
+    description: `تخارج كامل: ${investmentName}`,
+    cashEffect: exitProceeds,
+    bookValueEffect: -originalCost,
+    realizedProfitEffect: realizedProfit,
+    investmentId,
+    createdBy: userId,
+  });
+}
+
+export async function recordDividend(
+  investmentId: string,
+  investmentName: string,
+  amount: number,
+  date: Date,
+  userId: string,
+): Promise<void> {
+  await addLedgerEntry({
+    date,
+    type: 'invest_dividend',
+    description: `توزيع أرباح: ${investmentName}`,
+    cashEffect: amount,
+    investmentId,
+    createdBy: userId,
+  });
+}
+
+export async function recordCapitalIn(
+  investorId: string,
+  investorName: string,
+  amount: number,
+  date: Date,
+  userId: string,
+): Promise<void> {
+  await addLedgerEntry({
+    date,
+    type: 'capital_in',
+    description: `رأس مال: ${investorName}`,
+    cashEffect: amount,
+    investorId,
+    createdBy: userId,
+  });
+}
+
+export async function recordExpense(
+  expenseId: string,
+  description: string,
+  amount: number,
+  date: Date,
+  investmentId: string | undefined,
+  userId: string,
+): Promise<void> {
+  await addLedgerEntry({
+    date,
+    type: 'expense',
+    description: `مصروف: ${description}`,
+    cashEffect: -amount,
+    investmentId,
+    expenseId,
+    createdBy: userId,
+  });
+}
+
+export async function recordValuation(
+  investmentId: string,
+  investmentName: string,
+  newValue: number,
+  date: Date,
+  userId: string,
+): Promise<void> {
+  await addLedgerEntry({
+    date,
+    type: 'invest_valuation',
+    description: `إعادة تقييم: ${investmentName}`,
+    cashEffect: 0,
+    currentValueEffect: newValue,
+    investmentId,
+    createdBy: userId,
+  });
+}
+
+// ─── Migration & Rebuild ─────────────────────────────────────────────────
 
 export async function needsInvestmentMigration(): Promise<boolean> {
   const snap = await getDocs(
@@ -327,6 +464,7 @@ export async function migrateMissingData(userId: string): Promise<{ created: num
     const invId = d.id;
     if (existingInvestments.has(invId)) continue;
 
+    // تمويل الدخول
     if (inv.entryAmount && inv.entryAmount > 0) {
       await addLedgerEntry({
         date: inv.entryDate?.toDate?.() ?? new Date(),
@@ -340,6 +478,7 @@ export async function migrateMissingData(userId: string): Promise<{ created: num
       created++;
     }
 
+    // أرباح موزعة
     for (const div of inv.dividends || []) {
       await addLedgerEntry({
         date: div.date?.toDate?.() ?? new Date(),
@@ -352,6 +491,7 @@ export async function migrateMissingData(userId: string): Promise<{ created: num
       created++;
     }
 
+    // إغلاق الاستثمار
     if (inv.status === 'closed' && inv.closingAmount && inv.closingAmount > 0) {
       await addLedgerEntry({
         date: inv.closingDate?.toDate?.() ?? new Date(),
@@ -360,6 +500,23 @@ export async function migrateMissingData(userId: string): Promise<{ created: num
         cashEffect: inv.closingAmount,
         bookValueEffect: -inv.entryAmount,
         realizedProfitEffect: inv.closingAmount - inv.entryAmount,
+        investmentId: invId,
+        createdBy: userId,
+      });
+      created++;
+    }
+
+    // معالجة الانخفاض في القيمة (impairment) للاستثمارات المتعثرة أو النشطة ذات القيمة المنخفضة
+    const currentVal = inv.currentValue || inv.entryAmount;
+    if (currentVal < inv.entryAmount && inv.status !== 'closed') {
+      const impairmentLoss = inv.entryAmount - currentVal;
+      await addLedgerEntry({
+        date: inv.entryDate?.toDate?.() ?? new Date(),
+        type: 'invest_impairment',
+        description: `هبوط قيمة الاستثمار: ${inv.name || inv.id}`,
+        cashEffect: 0,
+        bookValueEffect: -impairmentLoss,
+        currentValueEffect: currentVal,
         investmentId: invId,
         createdBy: userId,
       });
@@ -389,20 +546,21 @@ export async function migrateMissingData(userId: string): Promise<{ created: num
   return { created, errors };
 }
 
-export async function needsMigration(): Promise<boolean> {
-  const snap = await getDocs(query(collection(db, 'ledger'), where('type', '==', 'capital_in')));
-  return snap.empty;
-}
-
-export async function migrateToLedger(userId: string): Promise<{ created: number; errors: string[] }> {
+export async function rebuildLedgerFromScratch(userId: string): Promise<{ created: number; errors: string[] }> {
   let created = 0;
   const errors: string[] = [];
 
-  const alreadyHasData = await needsMigration();
-  if (!alreadyHasData) {
-    return { created: 0, errors: ['الترحيل غير مطلوب - ledger يحتوي بالفعل على بيانات'] };
+  // حذف الـ ledger الحالي
+  try {
+    const existing = await getDocs(collection(db, 'ledger'));
+    const batch = writeBatch(db);
+    existing.docs.forEach((doc) => batch.delete(doc.ref));
+    await batch.commit();
+  } catch (e) {
+    errors.push(`فشل حذف ledger: ${e}`);
   }
 
+  // 1. رأس المال من المستثمرين
   try {
     const invSnap = await getDocs(collection(db, 'investors'));
     for (const d of invSnap.docs) {
@@ -411,7 +569,7 @@ export async function migrateToLedger(userId: string): Promise<{ created: number
       await addLedgerEntry({
         date: inv.joinDate?.toDate?.() ?? new Date(),
         type: 'capital_in',
-        description: `رأس مال مُرحَّل: ${inv.name}`,
+        description: `رأس مال: ${inv.name}`,
         cashEffect: inv.totalPaid,
         investorId: d.id,
         createdBy: userId,
@@ -419,69 +577,80 @@ export async function migrateToLedger(userId: string): Promise<{ created: number
       created++;
     }
   } catch (e) {
-    errors.push(`investors: ${e}`);
+    errors.push(`رأس المال: ${e}`);
   }
 
+  // 2. الاستثمارات
   try {
     const invstSnap = await getDocs(collection(db, 'investments'));
     for (const d of invstSnap.docs) {
       const inv = d.data();
-      if (!inv.entryAmount || inv.entryAmount <= 0) continue;
+      const invId = d.id;
+      const entryAmount = inv.entryAmount || 0;
+      if (entryAmount <= 0) continue;
 
+      // تمويل الدخول
       await addLedgerEntry({
         date: inv.entryDate?.toDate?.() ?? new Date(),
         type: 'invest_funding',
-        description: `استثمار مُرحَّل: ${inv.name || d.id}`,
-        cashEffect: -inv.entryAmount,
-        bookValueEffect: inv.entryAmount,
-        investmentId: d.id,
+        description: `تمويل استثمار: ${inv.name || invId}`,
+        cashEffect: -entryAmount,
+        bookValueEffect: entryAmount,
+        investmentId: invId,
         createdBy: userId,
       });
       created++;
 
-      for (const dv of inv.dividends || []) {
+      // الأرباح الموزعة
+      for (const div of inv.dividends || []) {
         await addLedgerEntry({
-          date: dv.date?.toDate?.() ?? new Date(),
+          date: div.date?.toDate?.() ?? new Date(),
           type: 'invest_dividend',
-          description: `توزيع مُرحَّل: ${inv.name || d.id}`,
-          cashEffect: dv.amount,
-          investmentId: d.id,
+          description: `توزيع أرباح: ${inv.name || invId}`,
+          cashEffect: div.amount,
+          investmentId: invId,
           createdBy: userId,
         });
         created++;
       }
 
-      if (inv.status === 'closed' && inv.closingAmount > 0) {
+      // إغلاق الاستثمار
+      if (inv.status === 'closed' && inv.closingAmount && inv.closingAmount > 0) {
         await addLedgerEntry({
           date: inv.closingDate?.toDate?.() ?? new Date(),
           type: 'invest_full_exit',
-          description: `إغلاق مُرحَّل: ${inv.name || d.id}`,
+          description: `إغلاق استثمار: ${inv.name || invId}`,
           cashEffect: inv.closingAmount,
-          bookValueEffect: -inv.entryAmount,
-          realizedProfitEffect: inv.closingAmount - inv.entryAmount,
-          investmentId: d.id,
+          bookValueEffect: -entryAmount,
+          realizedProfitEffect: inv.closingAmount - entryAmount,
+          investmentId: invId,
           createdBy: userId,
         });
         created++;
       }
 
-      for (const vu of inv.valueUpdates || []) {
+      // معالجة الانخفاض في القيمة للاستثمارات المتعثرة أو النشطة ذات القيمة المنخفضة
+      const currentVal = inv.currentValue || entryAmount;
+      if (currentVal < entryAmount && inv.status !== 'closed') {
+        const impairmentLoss = entryAmount - currentVal;
         await addLedgerEntry({
-          date: vu.date?.toDate?.() ?? new Date(),
-          type: 'invest_valuation',
-          description: `تقييم مُرحَّل: ${inv.name || d.id}`,
+          date: inv.entryDate?.toDate?.() ?? new Date(),
+          type: 'invest_impairment',
+          description: `هبوط قيمة الاستثمار: ${inv.name || invId}`,
           cashEffect: 0,
-          currentValueEffect: vu.newValue,
-          investmentId: d.id,
+          bookValueEffect: -impairmentLoss,
+          currentValueEffect: currentVal,
+          investmentId: invId,
           createdBy: userId,
         });
         created++;
       }
     }
   } catch (e) {
-    errors.push(`investments: ${e}`);
+    errors.push(`الاستثمارات: ${e}`);
   }
 
+  // 3. المصاريف
   try {
     const expSnap = await getDocs(collection(db, 'expenses'));
     for (const d of expSnap.docs) {
@@ -490,7 +659,7 @@ export async function migrateToLedger(userId: string): Promise<{ created: number
       await addLedgerEntry({
         date: exp.date?.toDate?.() ?? new Date(),
         type: 'expense',
-        description: `مصروف مُرحَّل: ${exp.description}`,
+        description: `مصروف: ${exp.description}`,
         cashEffect: -exp.amount,
         expenseId: d.id,
         investmentId: exp.investmentId,
@@ -499,10 +668,20 @@ export async function migrateToLedger(userId: string): Promise<{ created: number
       created++;
     }
   } catch (e) {
-    errors.push(`expenses: ${e}`);
+    errors.push(`المصاريف: ${e}`);
   }
 
   return { created, errors };
+}
+
+export async function needsMigration(): Promise<boolean> {
+  const snap = await getDocs(query(collection(db, 'ledger'), where('type', '==', 'capital_in')));
+  return snap.empty;
+}
+
+export async function migrateToLedger(userId: string): Promise<{ created: number; errors: string[] }> {
+  // التنبيه: هذه الدالة قديمة، يوصى باستخدام rebuildLedgerFromScratch
+  return rebuildLedgerFromScratch(userId);
 }
 
 // ─── Validation & Debug ───────────────────────────────────────────────────
@@ -564,129 +743,4 @@ export async function debugPortfolio(): Promise<void> {
   console.log(`أرباح غير محققة: ${snapshot.unrealizedProfit.toFixed(2)}`);
   console.log(`توزيعات مستلمة: ${snapshot.dividendsReceived.toFixed(2)}`);
   console.log(`مصاريف: ${snapshot.totalExpenses.toFixed(2)}`);
-}
-import { writeBatch } from 'firebase/firestore'; // تأكد من وجود هذا الاستيراد
-
-/**
- * إعادة بناء دفتر الأستاذ (ledger) بالكامل من البيانات الأساسية
- * - يحذف جميع وثائق ledger الموجودة مسبقاً
- * - ينشئ حركات رأس المال من المستثمرين
- * - ينشئ حركات تمويل الاستثمارات والأرباح والإغلاق
- * - ينشئ حركات المصاريف المعتمدة
- */
-export async function rebuildLedgerFromScratch(userId: string): Promise<{ created: number; errors: string[] }> {
-  let created = 0;
-  const errors: string[] = [];
-
-  // 1. حذف جميع وثائق ledger الحالية
-  try {
-    const existing = await getDocs(collection(db, 'ledger'));
-    const batch = writeBatch(db);
-    existing.docs.forEach((doc) => batch.delete(doc.ref));
-    await batch.commit();
-    console.log('✅ تم حذف ledger القديم');
-  } catch (e) {
-    errors.push(`فشل حذف ledger: ${e}`);
-  }
-
-  // 2. رأس المال من المستثمرين
-  try {
-    const investorsSnap = await getDocs(collection(db, 'investors'));
-    for (const doc of investorsSnap.docs) {
-      const inv = doc.data();
-      const amount = inv.totalPaid;
-      if (amount && amount > 0) {
-        await addLedgerEntry({
-          date: inv.joinDate?.toDate?.() ?? new Date(),
-          type: 'capital_in',
-          description: `رأس مال: ${inv.name || 'مستثمر'}`,
-          cashEffect: amount,
-          investorId: doc.id,
-          createdBy: userId,
-        });
-        created++;
-      }
-    }
-  } catch (e) {
-    errors.push(`رأس المال: ${e}`);
-  }
-
-  // 3. الاستثمارات (تمويل + أرباح + إغلاق)
-  try {
-    const investmentsSnap = await getDocs(collection(db, 'investments'));
-    for (const doc of investmentsSnap.docs) {
-      const inv = doc.data();
-      const invId = doc.id;
-      const entryAmount = inv.entryAmount;
-
-      // تمويل الدخول
-      if (entryAmount && entryAmount > 0) {
-        await addLedgerEntry({
-          date: inv.entryDate?.toDate?.() ?? new Date(),
-          type: 'invest_funding',
-          description: `تمويل استثمار: ${inv.name || invId}`,
-          cashEffect: -entryAmount,
-          bookValueEffect: entryAmount,
-          investmentId: invId,
-          createdBy: userId,
-        });
-        created++;
-      }
-
-      // الأرباح الموزعة
-      const dividends = inv.dividends || [];
-      for (const div of dividends) {
-        await addLedgerEntry({
-          date: div.date?.toDate?.() ?? new Date(),
-          type: 'invest_dividend',
-          description: `توزيع أرباح: ${inv.name || invId}`,
-          cashEffect: div.amount,
-          investmentId: invId,
-          createdBy: userId,
-        });
-        created++;
-      }
-
-      // إغلاق الاستثمار
-      if (inv.status === 'closed' && inv.closingAmount && inv.closingAmount > 0) {
-        await addLedgerEntry({
-          date: inv.closingDate?.toDate?.() ?? new Date(),
-          type: 'invest_full_exit',
-          description: `إغلاق استثمار: ${inv.name || invId}`,
-          cashEffect: inv.closingAmount,
-          bookValueEffect: -entryAmount,
-          realizedProfitEffect: inv.closingAmount - entryAmount,
-          investmentId: invId,
-          createdBy: userId,
-        });
-        created++;
-      }
-    }
-  } catch (e) {
-    errors.push(`الاستثمارات: ${e}`);
-  }
-
-  // 4. المصاريف المعتمدة
-  try {
-    const expensesSnap = await getDocs(collection(db, 'expenses'));
-    for (const doc of expensesSnap.docs) {
-      const exp = doc.data();
-      if (exp.status === 'approved' && exp.amount && exp.amount > 0) {
-        await addLedgerEntry({
-          date: exp.date?.toDate?.() ?? new Date(),
-          type: 'expense',
-          description: `مصروف: ${exp.description || 'بدون وصف'}`,
-          cashEffect: -exp.amount,
-          expenseId: doc.id,
-          investmentId: exp.investmentId || undefined,
-          createdBy: userId,
-        });
-        created++;
-      }
-    }
-  } catch (e) {
-    errors.push(`المصاريف: ${e}`);
-  }
-
-  return { created, errors };
 }
