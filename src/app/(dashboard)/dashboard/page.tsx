@@ -6,9 +6,7 @@ import { collection, getDocs, query, orderBy } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import {
   calcPortfolioSnapshot,
-  needsInvestmentMigration,
   migrateMissingData,
-  validateLedger,
   type PortfolioSnapshot,
 } from '@/lib/accounting';
 import { useAuth } from '@/context/AuthContext';
@@ -24,7 +22,6 @@ export default function DashboardPage() {
   const { user } = useAuth();
   const [loading, setLoading] = useState(true);
   const [migrating, setMigrating] = useState(false);
-  const [needsFix, setNeedsFix] = useState(false);
   const [snapshot, setSnapshot] = useState<PortfolioSnapshot | null>(null);
   const [error, setError] = useState('');
   const [investorCount, setInvestorCount] = useState(0);
@@ -33,13 +30,11 @@ export default function DashboardPage() {
     setLoading(true);
     setError('');
     try {
-      const [snap, needFix, invSnap] = await Promise.all([
+      const [snap, invSnap] = await Promise.all([
         calcPortfolioSnapshot(),
-        needsInvestmentMigration(),
         getDocs(collection(db, 'investors')),
       ]);
       setSnapshot(snap);
-      setNeedsFix(needFix);
       setInvestorCount(invSnap.size);
     } catch (e) {
       setError(String(e));
@@ -53,7 +48,7 @@ export default function DashboardPage() {
       alert('الرجاء تسجيل الدخول أولاً');
       return;
     }
-    if (!confirm('سيتم إضافة بيانات الاستثمارات والمصاريف الناقصة إلى ledger. هل تريد المتابعة؟')) return;
+    if (!confirm('سيتم إضافة جميع حركات الاستثمارات والمصاريف الناقصة إلى ledger. هل تريد المتابعة؟')) return;
     setMigrating(true);
     try {
       const result = await migrateMissingData(user.id);
@@ -112,11 +107,9 @@ export default function DashboardPage() {
           <p className="page-subtitle">{new Date().toLocaleDateString('ar-SA', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</p>
         </div>
         <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-          {needsFix && (
-            <button onClick={handleFixMissingData} className="btn-primary" style={{ padding: '0.5rem 0.75rem' }} disabled={migrating}>
-              {migrating ? 'جاري...' : 'ترحيل البيانات الناقصة'}
-            </button>
-          )}
+          <button onClick={handleFixMissingData} className="btn-primary" style={{ padding: '0.5rem 0.75rem' }} disabled={migrating}>
+            {migrating ? 'جاري...' : 'ترحيل البيانات الناقصة'}
+          </button>
           <button onClick={handleCheckLedger} className="btn-secondary" style={{ padding: '0.5rem 0.75rem' }}>
             فحص Ledger
           </button>
@@ -125,16 +118,6 @@ export default function DashboardPage() {
           </button>
         </div>
       </div>
-
-      {needsFix && !migrating && (
-        <div className="alert-warning">
-          <Database size={18} className="shrink-0" />
-          <div style={{ flex: 1 }}>
-            <p style={{ fontWeight: 700, marginBottom: 4 }}>بيانات الاستثمارات والمصاريف غير موجودة في سجل الحركات</p>
-            <p style={{ fontSize: '0.8rem', marginBottom: 8 }}>لحساب النقد والأرباح بشكل صحيح، اضغط على زر "ترحيل البيانات الناقصة".</p>
-          </div>
-        </div>
-      )}
 
       {error && (
         <div className="alert-danger">
@@ -145,6 +128,7 @@ export default function DashboardPage() {
 
       {s && (
         <>
+          {/* النقد */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.875rem' }}>
             <div
               style={{
@@ -153,7 +137,6 @@ export default function DashboardPage() {
                 background: s.availableCash >= 0 ? 'linear-gradient(135deg,#059669,#10b981)' : 'linear-gradient(135deg,#dc2626,#ef4444)',
                 color: '#fff',
                 gridColumn: 'span 2',
-                boxShadow: s.availableCash >= 0 ? '0 8px 32px rgba(5,150,105,.3)' : '0 8px 32px rgba(220,38,38,.3)',
               }}
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '0.5rem', opacity: 0.8 }}>
@@ -176,14 +159,117 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {/* باقي البطاقات والجداول - أضفها كما كانت ولكن اختصرتها للاختصار */}
+          {/* بطاقات سريعة */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: '0.875rem' }}>
+            <div className="stat-card">
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
+                <div style={{ width: 38, height: 38, borderRadius: 12, background: '#eff6ff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <DollarSign size={18} style={{ color: '#2563eb' }} />
+                </div>
+                <span style={{ fontSize: '0.65rem', color: 'var(--muted)', background: '#f1f5f9', padding: '2px 8px', borderRadius: '8px' }}>رأس المال</span>
+              </div>
+              <p style={{ fontSize: '1.125rem', fontWeight: 800, color: 'var(--navy)' }}>{formatCurrency(s.ownerCapitalIn)}</p>
+            </div>
+
+            <div className="stat-card">
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
+                <div style={{ width: 38, height: 38, borderRadius: 12, background: '#f5f3ff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <BarChart3 size={18} style={{ color: '#7c3aed' }} />
+                </div>
+                <span style={{ fontSize: '0.65rem', color: 'var(--muted)', background: '#f1f5f9', padding: '2px 8px', borderRadius: '8px' }}>NAV</span>
+              </div>
+              <p style={{ fontSize: '1.125rem', fontWeight: 800, color: 'var(--navy)' }}>{formatCurrency(s.netPortfolioValue)}</p>
+            </div>
+
+            <div className="stat-card">
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
+                <div style={{ width: 38, height: 38, borderRadius: 12, background: '#f0fdf4', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <Activity size={18} style={{ color: '#059669' }} />
+                </div>
+                <span style={{ fontSize: '0.65rem', fontWeight: 700, color: '#059669', background: '#dcfce7', padding: '2px 8px', borderRadius: '8px' }}>{s.activeCount} استثمار</span>
+              </div>
+              <p style={{ fontSize: '1.125rem', fontWeight: 800, color: 'var(--navy)' }}>{formatCurrency(s.activeCurrentValue)}</p>
+              <div style={{ marginTop: '6px', display: 'flex', gap: '8px', fontSize: '0.68rem' }}>
+                <span style={{ color: '#64748b' }}>تكلفة: {formatCurrency(s.activeTotalCost)}</span>
+              </div>
+            </div>
+
+            <div className="stat-card">
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
+                <div style={{ width: 38, height: 38, borderRadius: 12, background: s.unrealizedProfit >= 0 ? '#f0fdf4' : '#fef2f2', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <TrendingUp size={18} style={{ color: s.unrealizedProfit >= 0 ? '#059669' : '#dc2626' }} />
+                </div>
+                <span style={{ fontSize: '0.65rem', color: 'var(--muted)', background: '#f1f5f9', padding: '2px 8px', borderRadius: '8px' }}>غير محقق</span>
+              </div>
+              <p style={{ fontSize: '1.125rem', fontWeight: 800, color: s.unrealizedProfit >= 0 ? '#059669' : '#dc2626' }}>
+                {s.unrealizedProfit >= 0 ? '+' : ''}{formatCurrency(s.unrealizedProfit)}
+              </p>
+            </div>
+
+            <div className="stat-card">
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
+                <div style={{ width: 38, height: 38, borderRadius: 12, background: '#fffbeb', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <CheckCircle size={18} style={{ color: '#d97706' }} />
+                </div>
+                <span style={{ fontSize: '0.65rem', fontWeight: 700, color: '#92400e', background: '#fef3c7', padding: '2px 8px', borderRadius: '8px' }}>{s.closedCount} مغلقة</span>
+              </div>
+              <p style={{ fontSize: '1.125rem', fontWeight: 800, color: s.realizedProfit >= 0 ? '#059669' : '#dc2626' }}>
+                {s.realizedProfit >= 0 ? '+' : ''}{formatCurrency(s.realizedProfit)}
+              </p>
+            </div>
+
+            <div className="stat-card">
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
+                <div style={{ width: 38, height: 38, borderRadius: 12, background: '#fff7ed', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <ArrowUpRight size={18} style={{ color: '#c2410c' }} />
+                </div>
+                <span style={{ fontSize: '0.65rem', color: 'var(--muted)', background: '#f1f5f9', padding: '2px 8px', borderRadius: '8px' }}>توزيعات</span>
+              </div>
+              <p style={{ fontSize: '1.125rem', fontWeight: 800, color: '#c2410c' }}>{formatCurrency(s.dividendsReceived)}</p>
+            </div>
+
+            <div className="stat-card" style={{ gridColumn: 'span 2' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <div style={{ width: 38, height: 38, borderRadius: 12, background: '#fef2f2', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <ArrowDownRight size={18} style={{ color: '#dc2626' }} />
+                  </div>
+                  <div>
+                    <p style={{ fontSize: '1.125rem', fontWeight: 800, color: '#dc2626' }}>{formatCurrency(s.totalExpenses)}</p>
+                    <p style={{ fontSize: '0.7rem', color: 'var(--muted)' }}>المصروفات المعتمدة</p>
+                  </div>
+                </div>
+                {s.distressedCount > 0 && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '10px', padding: '6px 12px' }}>
+                    <XCircle size={14} style={{ color: '#dc2626' }} />
+                    <span style={{ fontSize: '0.75rem', fontWeight: 700, color: '#dc2626' }}>{s.distressedCount} متعثرة</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* روابط سريعة */}
           <div className="card" style={{ padding: '1.25rem' }}>
-            <h3 className="section-title">ملخص سريع</h3>
+            <h3 className="section-title">الأقسام</h3>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: '0.75rem' }}>
-              <div className="stat-card"><p style={{ fontSize: '0.8rem' }}>الأصول القائمة</p><p style={{ fontWeight: 800 }}>{formatCurrency(s.activeCurrentValue)}</p></div>
-              <div className="stat-card"><p style={{ fontSize: '0.8rem' }}>الأرباح المحققة</p><p style={{ fontWeight: 800, color: '#059669' }}>{formatCurrency(s.realizedProfit)}</p></div>
-              <div className="stat-card"><p style={{ fontSize: '0.8rem' }}>الأرباح غير المحققة</p><p style={{ fontWeight: 800 }}>{formatCurrency(s.unrealizedProfit)}</p></div>
-              <div className="stat-card"><p style={{ fontSize: '0.8rem' }}>إجمالي المصاريف</p><p style={{ fontWeight: 800, color: '#dc2626' }}>{formatCurrency(s.totalExpenses)}</p></div>
+              {[
+                { href: '/investments', label: 'الاستثمارات', sub: `${s.activeCount} قائمة`, icon: <TrendingUp size={18} />, color: 'var(--navy)', bg: '#eff6ff' },
+                { href: '/investors', label: 'المستثمرون', sub: `${investorCount} مستثمر`, icon: <Users size={18} />, color: '#7c3aed', bg: '#f5f3ff' },
+                { href: '/expenses', label: 'المصاريف', sub: formatCurrency(s.totalExpenses), icon: <ArrowDownRight size={18} />, color: '#dc2626', bg: '#fef2f2' },
+                { href: '/reports', label: 'التقارير', sub: 'تدفقات نقدية وأداء', icon: <BarChart3 size={18} />, color: '#0891b2', bg: '#ecfeff' },
+              ].map((link) => (
+                <Link key={link.href} href={link.href} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.875rem', borderRadius: '14px', background: link.bg, textDecoration: 'none', color: link.color }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.625rem' }}>
+                    {link.icon}
+                    <div>
+                      <p style={{ fontWeight: 700, fontSize: '0.85rem', lineHeight: 1.2 }}>{link.label}</p>
+                      <p style={{ fontSize: '0.7rem', opacity: 0.7, marginTop: '2px' }}>{link.sub}</p>
+                    </div>
+                  </div>
+                  <ChevronLeft size={15} style={{ opacity: 0.5 }} />
+                </Link>
+              ))}
             </div>
           </div>
         </>
