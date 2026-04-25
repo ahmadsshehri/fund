@@ -9,6 +9,7 @@ import {
   needsMigration, 
   migrateToLedger, 
   validateLedger,
+  addLedgerEntry,
   type PortfolioSnapshot 
 } from '@/lib/accounting';
 import { useAuth } from '@/context/AuthContext';
@@ -88,6 +89,114 @@ export default function DashboardPage() {
     }
   };
 
+  // ✅ دالة إصلاح ledger: تضيف الحركات الناقصة (استثمارات، أرباح، مصاريف) دون تكرار
+  const handleFixLedger = async () => {
+    if (!user) {
+      alert('الرجاء تسجيل الدخول أولاً');
+      return;
+    }
+    if (!confirm('سيتم إضافة حركات الاستثمارات والمصاريف الناقصة إلى ledger. هل تريد المتابعة؟')) return;
+    setMigrating(true);
+    try {
+      // استيراد الدوال الإضافية من firestore
+      const { getDocs, collection, doc: getDoc } = await import('firebase/firestore');
+      
+      // جلب جميع الاستثمارات والمصاريف و ledger الحالي
+      const [invSnap, expSnap, ledgerSnap] = await Promise.all([
+        getDocs(collection(db, 'investments')),
+        getDocs(collection(db, 'expenses')),
+        getDocs(collection(db, 'ledger')),
+      ]);
+
+      // سجل الـ IDs الموجودة حالياً في ledger (لتجنب التكرار)
+      const existingInvestmentIds = new Set<string>();
+      const existingExpenseIds = new Set<string>();
+      ledgerSnap.docs.forEach(doc => {
+        const data = doc.data();
+        if (data.investmentId) existingInvestmentIds.add(data.investmentId);
+        if (data.expenseId) existingExpenseIds.add(data.expenseId);
+      });
+
+      let added = 0;
+      // معالجة الاستثمارات
+      for (const docSnap of invSnap.docs) {
+        const inv = docSnap.data();
+        const invId = docSnap.id;
+        if (existingInvestmentIds.has(invId)) continue; // موجود بالفعل
+
+        // 1. تمويل الدخول
+        if (inv.entryAmount && inv.entryAmount > 0) {
+          await addLedgerEntry({
+            date: inv.entryDate?.toDate?.() || new Date(),
+            type: 'invest_funding',
+            description: `تمويل استثمار: ${inv.name || 'بدون اسم'}`,
+            cashEffect: -inv.entryAmount,
+            bookValueEffect: inv.entryAmount,
+            investmentId: invId,
+            createdBy: user.id,
+          });
+          added++;
+        }
+
+        // 2. أرباح موزعة
+        if (inv.dividends && Array.isArray(inv.dividends)) {
+          for (const div of inv.dividends) {
+            await addLedgerEntry({
+              date: div.date?.toDate?.() || new Date(),
+              type: 'invest_dividend',
+              description: `توزيع أرباح: ${inv.name || 'بدون اسم'}`,
+              cashEffect: div.amount,
+              investmentId: invId,
+              createdBy: user.id,
+            });
+            added++;
+          }
+        }
+
+        // 3. إغلاق إذا كان مغلقاً
+        if (inv.status === 'closed' && inv.closingAmount && inv.closingAmount > 0) {
+          await addLedgerEntry({
+            date: inv.closingDate?.toDate?.() || new Date(),
+            type: 'invest_full_exit',
+            description: `إغلاق استثمار: ${inv.name || 'بدون اسم'}`,
+            cashEffect: inv.closingAmount,
+            bookValueEffect: -inv.entryAmount,
+            realizedProfitEffect: inv.closingAmount - inv.entryAmount,
+            investmentId: invId,
+            createdBy: user.id,
+          });
+          added++;
+        }
+      }
+
+      // معالجة المصاريف
+      for (const docSnap of expSnap.docs) {
+        const exp = docSnap.data();
+        const expId = docSnap.id;
+        if (existingExpenseIds.has(expId)) continue;
+        if (exp.status === 'approved' && exp.amount && exp.amount > 0) {
+          await addLedgerEntry({
+            date: exp.date?.toDate?.() || new Date(),
+            type: 'expense',
+            description: `مصروف: ${exp.description || 'بدون وصف'}`,
+            cashEffect: -exp.amount,
+            expenseId: expId,
+            investmentId: exp.investmentId || undefined,
+            createdBy: user.id,
+          });
+          added++;
+        }
+      }
+
+      alert(`✅ تم إضافة ${added} حركة ناقصة إلى ledger.`);
+      await load(); // إعادة تحميل الصفحة
+    } catch (err) {
+      alert('خطأ أثناء الإصلاح: ' + err);
+    } finally {
+      setMigrating(false);
+    }
+  };
+
   const handleRunMigration = async () => {
     if (!user) {
       alert('الرجاء تسجيل الدخول أولاً');
@@ -135,7 +244,10 @@ export default function DashboardPage() {
           <h1 className="page-title">لوحة التحكم</h1>
           <p className="page-subtitle">{new Date().toLocaleDateString('ar-SA', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</p>
         </div>
-        <div style={{ display: 'flex', gap: '8px' }}>
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+          <button onClick={handleFixLedger} className="btn-secondary" style={{ padding: '0.5rem 0.75rem' }} disabled={migrating}>
+            إصلاح Ledger
+          </button>
           <button onClick={handleRunMigration} className="btn-primary" style={{ padding: '0.5rem 0.75rem' }} disabled={migrating}>
             {migrating ? 'جاري...' : 'تشغيل الترحيل'}
           </button>
