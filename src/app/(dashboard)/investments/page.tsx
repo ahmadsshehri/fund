@@ -47,27 +47,38 @@ const toDate = (v: unknown): Date => v instanceof Timestamp ? v.toDate() : v ins
 const daysBetween = (from: Date, to?: Date) => Math.max(1, Math.round(((to || new Date()).getTime() - from.getTime()) / 86400000));
 const pct = (n: number, decimals = 2) => `${n.toFixed(decimals)}%`;
 
-// ─── Core return calculations ──────────────────────────────────────────────
+// ─── Core return calculations (مصححة) ──────────────────────────────────────
 function calcReturns(inv: Investment) {
   const entryAmount = inv.entryAmount;
   const days = daysBetween(inv.entryDate, inv.closingDate);
   const years = days / 365;
 
-  // Total dividends received
+  // إجمالي الأرباح الموزعة المستلمة
   const totalDividends = inv.dividends.reduce((s, d) => s + d.amount, 0);
 
-  // Capital gain (closing - entry, or current - entry for open)
-  const capitalGain = inv.status === 'closed'
-    ? (inv.closingAmount || 0) - entryAmount
-    : inv.currentValue - entryAmount;
+  // مكسب رأس المال (يعتمد على نوع الاستثمار والحالة)
+  let capitalGain = 0;
+  if (inv.status === 'closed') {
+    // مغلق: الفرق بين مبلغ الإغلاق ورأس المال
+    capitalGain = (inv.closingAmount || 0) - entryAmount;
+  } else {
+    // قائم
+    if (inv.invType === 'accumulative') {
+      // تراكمي: الأرباح تضاف للأصل (القيمة الحالية - التكلفة)
+      capitalGain = inv.currentValue - entryAmount;
+    } else {
+      // يوزع أرباح: القيمة الحالية = التكلفة (لا مكسب رأسمالي حتى البيع)
+      capitalGain = 0;
+    }
+  }
 
-  // True total profit = dividends + capital gain
+  // صافي الربح الكلي = أرباح موزعة + مكسب رأسمالي
   const totalProfit = totalDividends + capitalGain;
 
-  // True return % = total profit / entry amount * 100
+  // العائد الحقيقي %
   const trueReturn = entryAmount > 0 ? (totalProfit / entryAmount) * 100 : 0;
-
-  // Annual return % = true return / years
+  
+  // العائد السنوي %
   const annualReturn = years > 0 ? trueReturn / years : 0;
 
   return { totalDividends, capitalGain, totalProfit, trueReturn, annualReturn };
@@ -148,17 +159,27 @@ export default function InvestmentsPage() {
 
   useEffect(() => { load(); }, []);
 
-  // ─── Portfolio-level metrics ───────────────────────────────────────────────
+  // ─── Portfolio-level metrics (مصححة) ───────────────────────────────────────
   const activeInvs = investments.filter(i => i.status === 'active');
   const closedInvs = investments.filter(i => i.status === 'closed');
 
-  // إجمالي رأس المال = ما دفعه المستثمرون (وليس مجموع مبالغ الاستثمارات)
+  // إجمالي رأس المال = ما دفعه المستثمرون
   const totalCapitalReal = ownerCapital;
+  
+  // إجمالي الأرباح الموزعة من جميع الاستثمارات
   const totalDividendsAll = investments.reduce((s, i) => s + i.dividends.reduce((ss, d) => ss + d.amount, 0), 0);
+  
+  // إجمالي مكاسب رأس المال (محققة + غير محققة) - مع مراعاة نوع الاستثمار
   const totalCapitalGainAll = closedInvs.reduce((s, i) => s + ((i.closingAmount || 0) - i.entryAmount), 0)
-    + activeInvs.reduce((s, i) => s + (i.currentValue - i.entryAmount), 0);
+    + activeInvs.reduce((s, i) => {
+      if (i.invType === 'accumulative') {
+        return s + (i.currentValue - i.entryAmount);
+      }
+      // استثمار يوزع أرباح: لا مكسب رأسمالي حتى البيع
+      return s;
+    }, 0);
+  
   const totalProfitAll = totalDividendsAll + totalCapitalGainAll;
-  // العائد على رأس المال الحقيقي
   const portfolioReturn = totalCapitalReal > 0 ? (totalProfitAll / totalCapitalReal) * 100 : 0;
 
   const filtered = investments.filter(inv =>
@@ -210,6 +231,8 @@ export default function InvestmentsPage() {
         closingDate: closingDate || null, closingAmount: closingAmount || null,
         totalProfit, annualReturn, trueReturn,
         distressReason: form.distressReason || null, distressDate: distressDate || null,
+        // للاستثمارات التي توزع أرباح، القيمة الحالية = التكلفة
+        currentValue: form.invType === 'dividend' ? entryAmount : (closingAmount || entryAmount),
       };
 
       if (editInv) {
@@ -218,7 +241,6 @@ export default function InvestmentsPage() {
         const num = `INV-${String(investments.length + 1).padStart(4, '0')}`;
         await addDoc(collection(db, 'investments'), {
           ...data, investmentNumber: num,
-          currentValue: closingAmount || entryAmount,
           dividends: [], valueUpdates: [], additionalAmounts: [],
           createdAt: serverTimestamp(), createdBy: user?.id,
         });
@@ -257,7 +279,7 @@ export default function InvestmentsPage() {
     finally { setSaving(false); }
   };
 
-  // ─── Close investment ─────────────────────────────────────────────────────
+  // ─── Close investment (مصحح) ───────────────────────────────────────────────
   const handleClose = async () => {
     if (!showClose || !closeForm.closingDate || !closeForm.closingAmount) { setError('يرجى تعبئة جميع الحقول'); return; }
     setSaving(true); setError('');
@@ -265,64 +287,104 @@ export default function InvestmentsPage() {
       const inv = showClose;
       const closingAmount = parseFloat(closeForm.closingAmount);
       const closingDate = new Date(closeForm.closingDate);
-      const totalDividends = inv.dividends.reduce((s, d) => s + d.amount, 0);
-      const capitalGain = closingAmount - inv.entryAmount;
-      const totalProfit = totalDividends + capitalGain;
+      
+      // استخدام دالة calcReturns للحساب الصحيح
+      const tempInv = { ...inv, status: 'closed' as InvStatus, closingAmount };
+      const returns = calcReturns(tempInv);
+      
       const days = daysBetween(inv.entryDate, closingDate);
-      const trueReturn = inv.entryAmount > 0 ? (totalProfit / inv.entryAmount) * 100 : 0;
-      const annualReturn = days > 0 ? trueReturn / (days / 365) : 0;
 
       await updateDoc(doc(db, 'investments', inv.id), {
-        status: 'closed', closingDate: Timestamp.fromDate(closingDate),
-        closingAmount, totalProfit, trueReturn, annualReturn, currentValue: closingAmount,
+        status: 'closed',
+        closingDate: Timestamp.fromDate(closingDate),
+        closingAmount,
+        totalProfit: returns.totalProfit,
+        trueReturn: returns.trueReturn,
+        annualReturn: returns.annualReturn,
+        currentValue: closingAmount,
       });
+      
       await addDoc(collection(db, 'cashFlows'), {
         type: 'investment_return', date: Timestamp.fromDate(closingDate),
         amount: closingAmount, referenceId: inv.id,
         description: `إغلاق استثمار: ${inv.name}`,
         createdBy: user?.id, createdAt: serverTimestamp(),
       });
+      
       setShowClose(null); setCloseForm({ closingDate: '', closingAmount: '' }); await load();
     } catch (e: unknown) { setError(e instanceof Error ? e.message : 'حدث خطأ'); }
     finally { setSaving(false); }
   };
 
-  // ─── Add dividend ─────────────────────────────────────────────────────────
+  // ─── Add dividend (مصحح - الأهم) ───────────────────────────────────────────
   const handleAddDividend = async () => {
-    if (!showAddDividend || !dividendForm.date || !dividendForm.amount) { setError('يرجى تعبئة جميع الحقول'); return; }
-    setSaving(true); setError('');
+    if (!showAddDividend || !dividendForm.date || !dividendForm.amount) { 
+      setError('يرجى تعبئة جميع الحقول'); 
+      return; 
+    }
+    setSaving(true); 
+    setError('');
     try {
       const inv = showAddDividend;
       const amount = parseFloat(dividendForm.amount);
       const newDividend = {
         id: Date.now().toString(),
         date: Timestamp.fromDate(new Date(dividendForm.date)),
-        amount, notes: dividendForm.notes,
+        amount, 
+        notes: dividendForm.notes,
       };
       const updatedDividends = [
         ...inv.dividends.map(d => ({ ...d, date: Timestamp.fromDate(d.date) })),
         newDividend,
       ];
       const totalDividends = updatedDividends.reduce((s, d) => s + d.amount, 0);
-      const capitalGain = inv.status === 'closed' ? (inv.closingAmount || 0) - inv.entryAmount : inv.currentValue - inv.entryAmount;
+      
+      // ✅ التصحيح: حساب العوائد حسب نوع الاستثمار
+      let capitalGain = 0;
+      let currentValueForUpdate = inv.currentValue;
+      
+      if (inv.invType === 'accumulative') {
+        // تراكمي: الأرباح تضاف للأصل (القيمة الحالية تتغير)
+        capitalGain = inv.currentValue - inv.entryAmount;
+      } else {
+        // يوزع أرباح: القيمة الحالية = التكلفة (لا ربح رأسمالي حتى التخارج)
+        capitalGain = 0;
+        // القيمة الحالية لا تتغير عند استلام أرباح موزعة
+        currentValueForUpdate = inv.entryAmount;
+      }
+      
       const totalProfit = totalDividends + capitalGain;
-      const days = daysBetween(inv.entryDate, inv.closingDate);
+      const days = daysBetween(inv.entryDate);
       const trueReturn = inv.entryAmount > 0 ? (totalProfit / inv.entryAmount) * 100 : 0;
       const annualReturn = days > 0 ? trueReturn / (days / 365) : 0;
 
       await updateDoc(doc(db, 'investments', inv.id), {
-        dividends: updatedDividends, totalProfit, trueReturn, annualReturn,
+        dividends: updatedDividends,
+        totalProfit,
+        trueReturn,
+        annualReturn,
+        ...(inv.invType === 'dividend' ? { currentValue: currentValueForUpdate } : {}),
       });
-      // Cash flow: dividend received
+      
+      // تسجيل التدفق النقدي (الأرباح الموزعة دخلت الكاش)
       await addDoc(collection(db, 'cashFlows'), {
-        type: 'profit_received', date: Timestamp.fromDate(new Date(dividendForm.date)),
-        amount, referenceId: inv.id,
+        type: 'profit_received',
+        date: Timestamp.fromDate(new Date(dividendForm.date)),
+        amount,
+        referenceId: inv.id,
         description: `أرباح موزعة: ${inv.name}`,
-        createdBy: user?.id, createdAt: serverTimestamp(),
+        createdBy: user?.id,
+        createdAt: serverTimestamp(),
       });
-      setShowAddDividend(null); setDividendForm({ date: '', amount: '', notes: '' }); await load();
-    } catch (e: unknown) { setError(e instanceof Error ? e.message : 'حدث خطأ'); }
-    finally { setSaving(false); }
+      
+      setShowAddDividend(null);
+      setDividendForm({ date: '', amount: '', notes: '' });
+      await load();
+    } catch (e: unknown) { 
+      setError(e instanceof Error ? e.message : 'حدث خطأ'); 
+    } finally { 
+      setSaving(false); 
+    }
   };
 
   // ─── Add capital ──────────────────────────────────────────────────────────
@@ -336,22 +398,28 @@ export default function InvestmentsPage() {
         ...inv.additionalAmounts.map(a => ({ ...a, date: Timestamp.fromDate(a.date) })),
         { date: Timestamp.fromDate(new Date(capitalForm.date)), amount, notes: capitalForm.notes },
       ];
+      const newEntryAmount = inv.entryAmount + amount;
+      const newCurrentValue = inv.invType === 'dividend' ? newEntryAmount : inv.currentValue + amount;
+      
       await updateDoc(doc(db, 'investments', inv.id), {
-        entryAmount: inv.entryAmount + amount, currentValue: inv.currentValue + amount,
+        entryAmount: newEntryAmount,
+        currentValue: newCurrentValue,
         additionalAmounts: updatedAdditional,
       });
+      
       await addDoc(collection(db, 'cashFlows'), {
         type: 'investment_out', date: Timestamp.fromDate(new Date(capitalForm.date)),
         amount: -amount, referenceId: inv.id,
         description: `إضافة رأس مال: ${inv.name}`,
         createdBy: user?.id, createdAt: serverTimestamp(),
       });
+      
       setShowAddCapital(null); setCapitalForm({ date: '', amount: '', notes: '' }); await load();
     } catch (e: unknown) { setError(e instanceof Error ? e.message : 'حدث خطأ'); }
     finally { setSaving(false); }
   };
 
-  // ─── Update value (accumulative) ───────────────────────────────────────────
+  // ─── Update value (accumulative only) ──────────────────────────────────────
   const handleUpdateValue = async () => {
     if (!showAddProfit || !profitForm.date || !profitForm.newValue) { setError('يرجى تعبئة جميع الحقول'); return; }
     setSaving(true); setError('');
@@ -362,6 +430,7 @@ export default function InvestmentsPage() {
         id: Date.now().toString(), date: Timestamp.fromDate(new Date(profitForm.date)),
         previousValue: inv.currentValue, newValue, profit: newValue - inv.currentValue, notes: profitForm.notes,
       };
+      
       const totalDividends = inv.dividends.reduce((s, d) => s + d.amount, 0);
       const capitalGain = newValue - inv.entryAmount;
       const totalProfit = totalDividends + capitalGain;
@@ -376,38 +445,49 @@ export default function InvestmentsPage() {
           newUpdate,
         ],
       });
+      
       setShowAddProfit(null); setProfitForm({ date: '', newValue: '', notes: '' }); await load();
     } catch (e: unknown) { setError(e instanceof Error ? e.message : 'حدث خطأ'); }
     finally { setSaving(false); }
   };
 
-  // ─── Render ───────────────────────────────────────────────────────────────
-
-  // ─── Edit Dividend ─────────────────────────────────────────────────────────
+  // ─── Edit Dividend (مصحح) ───────────────────────────────────────────────────
   const handleEditDividend = async () => {
     if (!editDividend || !dividendForm.date || !dividendForm.amount) { setError('يرجى تعبئة جميع الحقول'); return; }
     setSaving(true); setError('');
     try {
       const inv = investments.find(i => i.id === editDividend.invId);
       if (!inv) throw new Error('الاستثمار غير موجود');
+      
       const updatedDividends = inv.dividends.map(d =>
         d.id === editDividend.record.id
-          ? { ...d, date: Timestamp.fromDate(new Date(dividendForm.date)), amount: parseFloat(dividendForm.amount), notes: dividendForm.notes }
-          : { ...d, date: Timestamp.fromDate(d.date) }
+          ? { ...d, date: new Date(dividendForm.date), amount: parseFloat(dividendForm.amount), notes: dividendForm.notes }
+          : d
       );
-      const totalDivs = updatedDividends.reduce((s, d) => s + (d.amount as number), 0);
-      const capitalGain = inv.status === 'closed' ? (inv.closingAmount || 0) - inv.entryAmount : inv.currentValue - inv.entryAmount;
-      const totalProfit = totalDivs + capitalGain;
+      
+      const totalDividends = updatedDividends.reduce((s, d) => s + d.amount, 0);
+      let capitalGain = 0;
+      
+      if (inv.status === 'closed') {
+        capitalGain = (inv.closingAmount || 0) - inv.entryAmount;
+      } else if (inv.invType === 'accumulative') {
+        capitalGain = inv.currentValue - inv.entryAmount;
+      }
+      
+      const totalProfit = totalDividends + capitalGain;
       const trueReturn = inv.entryAmount > 0 ? (totalProfit / inv.entryAmount) * 100 : 0;
       const days = daysBetween(inv.entryDate, inv.closingDate);
       const annualReturn = days > 0 ? trueReturn / (days / 365) : 0;
+      
       await updateDoc(doc(db, 'investments', editDividend.invId), {
-        dividends: updatedDividends, totalProfit, trueReturn, annualReturn,
+        dividends: updatedDividends.map(d => ({ ...d, date: Timestamp.fromDate(d.date) })),
+        totalProfit, trueReturn, annualReturn,
       });
+      
       setEditDividend(null);
       setDividendForm({ date: '', amount: '', notes: '' });
       await load();
-      // Refresh detail modal
+      
       const updated = investments.find(i => i.id === editDividend.invId);
       if (updated) setShowDetail(updated);
     } catch (e: unknown) { setError(e instanceof Error ? e.message : 'حدث خطأ'); }
@@ -419,17 +499,24 @@ export default function InvestmentsPage() {
     if (!confirm('هل تريد حذف هذه الأرباح الموزعة؟')) return;
     setSaving(true);
     try {
-      const updatedDividends = inv.dividends
-        .filter(d => d.id !== dividendId)
-        .map(d => ({ ...d, date: Timestamp.fromDate(d.date) }));
-      const totalDivs = updatedDividends.reduce((s, d) => s + (d.amount as number), 0);
-      const capitalGain = inv.status === 'closed' ? (inv.closingAmount || 0) - inv.entryAmount : inv.currentValue - inv.entryAmount;
-      const totalProfit = totalDivs + capitalGain;
+      const updatedDividends = inv.dividends.filter(d => d.id !== dividendId);
+      const totalDividends = updatedDividends.reduce((s, d) => s + d.amount, 0);
+      let capitalGain = 0;
+      
+      if (inv.status === 'closed') {
+        capitalGain = (inv.closingAmount || 0) - inv.entryAmount;
+      } else if (inv.invType === 'accumulative') {
+        capitalGain = inv.currentValue - inv.entryAmount;
+      }
+      
+      const totalProfit = totalDividends + capitalGain;
       const trueReturn = inv.entryAmount > 0 ? (totalProfit / inv.entryAmount) * 100 : 0;
       const days = daysBetween(inv.entryDate, inv.closingDate);
       const annualReturn = days > 0 ? trueReturn / (days / 365) : 0;
+      
       await updateDoc(doc(db, 'investments', inv.id), {
-        dividends: updatedDividends, totalProfit, trueReturn, annualReturn,
+        dividends: updatedDividends.map(d => ({ ...d, date: Timestamp.fromDate(d.date) })),
+        totalProfit, trueReturn, annualReturn,
       });
       await load();
     } catch (e) { console.error(e); }
@@ -444,6 +531,7 @@ export default function InvestmentsPage() {
       const inv = investments.find(i => i.id === editValueUpdate.invId);
       if (!inv) throw new Error('الاستثمار غير موجود');
       const newValue = parseFloat(profitForm.newValue);
+      
       const updatedUpdates = inv.valueUpdates.map((u, idx) => {
         if (u.id !== editValueUpdate.record.id) return { ...u, date: Timestamp.fromDate(u.date) };
         const prevValue = idx > 0 ? inv.valueUpdates[idx - 1].newValue : inv.entryAmount;
@@ -456,16 +544,19 @@ export default function InvestmentsPage() {
           notes: profitForm.notes,
         };
       });
-      const totalDivs = inv.dividends.reduce((s, d) => s + d.amount, 0);
+      
+      const totalDividends = inv.dividends.reduce((s, d) => s + d.amount, 0);
       const capitalGain = newValue - inv.entryAmount;
-      const totalProfit = totalDivs + capitalGain;
+      const totalProfit = totalDividends + capitalGain;
       const trueReturn = inv.entryAmount > 0 ? (totalProfit / inv.entryAmount) * 100 : 0;
       const days = daysBetween(inv.entryDate);
       const annualReturn = days > 0 ? trueReturn / (days / 365) : 0;
+      
       await updateDoc(doc(db, 'investments', editValueUpdate.invId), {
         currentValue: newValue, totalProfit, trueReturn, annualReturn,
         valueUpdates: updatedUpdates,
       });
+      
       setEditValueUpdate(null);
       setProfitForm({ date: '', newValue: '', notes: '' });
       await load();
@@ -479,16 +570,17 @@ export default function InvestmentsPage() {
     setSaving(true);
     try {
       const filtered = inv.valueUpdates.filter(u => u.id !== updateId);
-      // القيمة الحالية = آخر تحديث إن وجد، وإلا رأس المال
       const newCurrentValue = filtered.length > 0
         ? filtered[filtered.length - 1].newValue
         : inv.entryAmount;
-      const totalDivs = inv.dividends.reduce((s, d) => s + d.amount, 0);
+      
+      const totalDividends = inv.dividends.reduce((s, d) => s + d.amount, 0);
       const capitalGain = newCurrentValue - inv.entryAmount;
-      const totalProfit = totalDivs + capitalGain;
+      const totalProfit = totalDividends + capitalGain;
       const trueReturn = inv.entryAmount > 0 ? (totalProfit / inv.entryAmount) * 100 : 0;
       const days = daysBetween(inv.entryDate);
       const annualReturn = days > 0 ? trueReturn / (days / 365) : 0;
+      
       await updateDoc(doc(db, 'investments', inv.id), {
         currentValue: newCurrentValue, totalProfit, trueReturn, annualReturn,
         valueUpdates: filtered.map(u => ({ ...u, date: Timestamp.fromDate(u.date) })),
@@ -497,6 +589,7 @@ export default function InvestmentsPage() {
     } catch (e) { console.error(e); }
     finally { setSaving(false); }
   };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -595,7 +688,7 @@ export default function InvestmentsPage() {
                     <p className="text-xs text-slate-400">{inv.entity}</p>
                     {inv.dividends.length > 0 && <p className="text-xs text-orange-500">{inv.dividends.length} توزيع</p>}
                     {inv.valueUpdates.length > 0 && <p className="text-xs text-purple-500">{inv.valueUpdates.length} تحديث قيمة</p>}
-                  </td>
+                   </td>
                   <td><span className={TYPE_COLORS[inv.invType]}>{TYPE_LABELS[inv.invType]}</span></td>
                   <td className="text-slate-600">{formatDate(inv.entryDate)}</td>
                   <td className="font-semibold text-blue-700">{formatCurrency(inv.entryAmount)}</td>
@@ -614,7 +707,7 @@ export default function InvestmentsPage() {
                     <span className={`${STATUS_COLORS[inv.status]} flex items-center gap-1 w-fit text-xs`}>
                       {STATUS_LABELS[inv.status]}
                     </span>
-                  </td>
+                   </td>
                   <td>
                     <div className="flex items-center gap-1 flex-wrap">
                       <button onClick={() => setShowDetail(inv)} className="p-1.5 hover:bg-blue-50 text-blue-600 rounded-lg" title="تفاصيل"><Eye size={15} /></button>
@@ -631,15 +724,15 @@ export default function InvestmentsPage() {
                       </>)}
                       <button onClick={() => setConfirmDelete(inv)} className="p-1.5 hover:bg-red-50 text-red-500 rounded-lg" title="حذف"><Trash2 size={15} /></button>
                     </div>
-                  </td>
-                </tr>
+                   </td>
+                 </tr>
               );
             })}
           </tbody>
         </table>
       </div>
 
-      {/* ── Detail Modal ─────────────────────────────────────────────────────── */}
+      {/* Detail Modal */}
       {showDetail && (() => {
         const r = calcReturns(showDetail);
         return (
@@ -789,7 +882,7 @@ export default function InvestmentsPage() {
         );
       })()}
 
-      {/* ── Add/Edit Modal ────────────────────────────────────────────────────── */}
+      {/* Add/Edit Modal */}
       {showAdd && (
         <div className="modal-overlay" onClick={() => { setShowAdd(false); setEditInv(null); }}>
           <div className="modal" onClick={e => e.stopPropagation()}>
@@ -865,7 +958,7 @@ export default function InvestmentsPage() {
         </div>
       )}
 
-      {/* ── Add Dividend Modal ────────────────────────────────────────────────── */}
+      {/* Add Dividend Modal */}
       {showAddDividend && (
         <div className="modal-overlay" onClick={() => setShowAddDividend(null)}>
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={e => e.stopPropagation()}>
@@ -876,8 +969,12 @@ export default function InvestmentsPage() {
             <div className="modal-body space-y-4">
               <div className="bg-orange-50 border border-orange-200 rounded-xl p-4">
                 <p className="font-semibold text-orange-800">{showAddDividend.name}</p>
+                <p className="text-sm text-orange-600">نوع الاستثمار: {TYPE_LABELS[showAddDividend.invType]}</p>
                 <p className="text-sm text-orange-600">رأس المال: {formatCurrency(showAddDividend.entryAmount)}</p>
                 <p className="text-sm text-orange-600">إجمالي أرباح سابقة: {formatCurrency(showAddDividend.dividends.reduce((s, d) => s + d.amount, 0))}</p>
+                {showAddDividend.invType === 'dividend' && (
+                  <p className="text-xs text-orange-500 mt-2">ملاحظة: الاستثمارات التي توزع أرباح لا تتغير قيمتها الحالية عند استلام الأرباح</p>
+                )}
               </div>
               {error && <div className="alert-danger text-sm"><AlertCircle size={16} />{error}</div>}
               <div><label className="label">تاريخ استلام الأرباح *</label><input className="input" type="date" value={dividendForm.date} onChange={e => setDividendForm({ ...dividendForm, date: e.target.value })} /></div>
@@ -902,7 +999,7 @@ export default function InvestmentsPage() {
         </div>
       )}
 
-      {/* ── Close Modal ───────────────────────────────────────────────────────── */}
+      {/* Close Modal */}
       {showClose && (
         <div className="modal-overlay" onClick={() => setShowClose(null)}>
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={e => e.stopPropagation()}>
@@ -913,6 +1010,7 @@ export default function InvestmentsPage() {
             <div className="modal-body space-y-4">
               <div className="bg-blue-50 rounded-xl p-4">
                 <p className="font-semibold text-blue-800">{showClose.name}</p>
+                <p className="text-sm text-blue-600">نوع الاستثمار: {TYPE_LABELS[showClose.invType]}</p>
                 <p className="text-sm text-blue-600">رأس المال: {formatCurrency(showClose.entryAmount)}</p>
                 {showClose.dividends.length > 0 && <p className="text-sm text-orange-600">أرباح موزعة سابقاً: {formatCurrency(showClose.dividends.reduce((s, d) => s + d.amount, 0))}</p>}
               </div>
@@ -943,7 +1041,7 @@ export default function InvestmentsPage() {
         </div>
       )}
 
-      {/* ── Add Capital Modal ─────────────────────────────────────────────────── */}
+      {/* Add Capital Modal */}
       {showAddCapital && (
         <div className="modal-overlay" onClick={() => setShowAddCapital(null)}>
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={e => e.stopPropagation()}>
@@ -970,7 +1068,7 @@ export default function InvestmentsPage() {
         </div>
       )}
 
-      {/* ── Update Value Modal ────────────────────────────────────────────────── */}
+      {/* Update Value Modal */}
       {showAddProfit && (
         <div className="modal-overlay" onClick={() => setShowAddProfit(null)}>
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={e => e.stopPropagation()}>
@@ -1012,7 +1110,7 @@ export default function InvestmentsPage() {
         </div>
       )}
 
-      {/* ── Confirm Delete ────────────────────────────────────────────────────── */}
+      {/* Confirm Delete Modal */}
       {confirmDelete && (
         <div className="modal-overlay" onClick={() => setConfirmDelete(null)}>
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={e => e.stopPropagation()}>
@@ -1046,7 +1144,7 @@ export default function InvestmentsPage() {
         </div>
       )}
 
-      {/* ── Edit Dividend Modal ───────────────────────────────────────────────── */}
+      {/* Edit Dividend Modal */}
       {editDividend && (
         <div className="modal-overlay" onClick={() => setEditDividend(null)}>
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={e => e.stopPropagation()}>
@@ -1059,7 +1157,7 @@ export default function InvestmentsPage() {
             </div>
             <div className="modal-body space-y-4">
               <div className="bg-orange-50 border border-orange-200 rounded-xl p-3">
-                <p className="text-xs text-orange-600">القيمة الحالية: <strong>{formatCurrency(editDividend.record.amount)}</strong> — {formatDate(editDividend.record.date)}</p>
+                <p className="text-xs text-orange-600">المبلغ الحالي: <strong>{formatCurrency(editDividend.record.amount)}</strong> — {formatDate(editDividend.record.date)}</p>
               </div>
               {error && <div className="alert-danger text-sm"><AlertCircle size={16} />{error}</div>}
               <div>
@@ -1085,7 +1183,7 @@ export default function InvestmentsPage() {
         </div>
       )}
 
-      {/* ── Edit Value Update Modal ───────────────────────────────────────────── */}
+      {/* Edit Value Update Modal */}
       {editValueUpdate && (
         <div className="modal-overlay" onClick={() => setEditValueUpdate(null)}>
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={e => e.stopPropagation()}>
