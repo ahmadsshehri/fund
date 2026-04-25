@@ -7,7 +7,7 @@ import { useAuth } from '@/context/AuthContext';
 import { formatCurrency } from '@/lib/utils';
 import {
   LayoutDashboard, Users, TrendingUp, Receipt, GitBranch,
-  BarChart3, Settings, UserCog, LogOut, Building2,
+  BarChart3, Settings, UserCog, LogOut, Building2, Scale,
   Wallet, FileText, ChevronRight, Menu, X,
 } from 'lucide-react';
 
@@ -20,6 +20,7 @@ const navItems: NavItem[] = [
   { href: '/expenses',        icon: <Receipt size={20} />,         label: 'المصاريف',     roles: ['manager','admin'] },
   { href: '/distributions',   icon: <GitBranch size={20} />,       label: 'التوزيعات',    roles: ['manager','admin'] },
   { href: '/reports',         icon: <BarChart3 size={20} />,       label: 'التقارير',     roles: ['manager','admin'] },
+  { href: '/trial-balance',   icon: <Scale size={20} />,           label: 'ميزان المراجعة', roles: ['manager'] },
   { href: '/investor-portal', icon: <FileText size={20} />,        label: 'بوابتي',       roles: ['investor'] },
   { href: '/users',           icon: <UserCog size={20} />,         label: 'المستخدمون',   roles: ['manager'] },
   { href: '/settings',        icon: <Settings size={20} />,        label: 'الإعدادات',    roles: ['manager','admin','investor'] },
