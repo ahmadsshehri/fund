@@ -25,6 +25,7 @@ export default function InvestorPortalPage() {
       setLoading(true);
       try {
         let investorId = user.investorId;
+        console.log('[Portal] user:', user.id, 'investorId:', investorId);
 
         // ✅ إذا لم يكن investorId موجوداً في الـ session،
         // ابحث عن المستثمر عبر userId في collection investors
