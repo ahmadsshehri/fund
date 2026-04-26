@@ -4,14 +4,10 @@ export const dynamic = 'force-dynamic';
 
 import { useEffect, useState } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { getInvestor, getInvestments, getDistributions, getInvestorHistory } from '@/lib/db';
-import { formatCurrency, formatDate, formatPercent, formatNumber, INVESTMENT_STATUSES } from '@/lib/utils';
+import { getInvestor, getInvestors, getInvestments, getDistributions, getInvestorHistory } from '@/lib/db';
+import { formatCurrency, formatDate, formatPercent, formatNumber } from '@/lib/utils';
 import type { Investor, Investment, Distribution, InvestorHistory } from '@/types';
-import {
-  User, TrendingUp, DollarSign, Layers, Calendar, Download,
-  FileText, Activity, CheckCircle, XCircle, PauseCircle, BarChart3,
-} from 'lucide-react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { User, TrendingUp, DollarSign, Layers, Download, BarChart3 } from 'lucide-react';
 
 export default function InvestorPortalPage() {
   const { user } = useAuth();
@@ -20,40 +16,90 @@ export default function InvestorPortalPage() {
   const [distributions, setDistributions] = useState<Distribution[]>([]);
   const [history, setHistory] = useState<InvestorHistory[]>([]);
   const [loading, setLoading] = useState(true);
+  const [notLinked, setNotLinked] = useState(false);
 
   useEffect(() => {
+    if (!user) return;
+
     const load = async () => {
-      if (!user?.investorId) return;
-      const [inv, invs, dists, hist] = await Promise.all([
-        getInvestor(user.investorId),
-        getInvestments(),
-        getDistributions(),
-        getInvestorHistory(user.investorId),
-      ]);
-      setInvestor(inv);
-      setInvestments(invs);
-      // Only this investor's distributions
-      const myDists = dists.filter(d => d.status === 'approved' && (d.investorId === user.investorId || d.details?.some(det => det.investorId === user.investorId)));
-      setDistributions(myDists);
-      setHistory(hist);
-      setLoading(false);
+      setLoading(true);
+      try {
+        let investorId = user.investorId;
+
+        // ✅ إذا لم يكن investorId موجوداً في الـ session،
+        // ابحث عن المستثمر عبر userId في collection investors
+        if (!investorId) {
+          const allInvestors = await getInvestors();
+          const matched = allInvestors.find(i => i.userId === user.id);
+          if (matched) {
+            investorId = matched.id;
+          } else {
+            // ليس مرتبطاً بأي مستثمر
+            setNotLinked(true);
+            setLoading(false);
+            return;
+          }
+        }
+
+        const [inv, invs, dists, hist] = await Promise.all([
+          getInvestor(investorId),
+          getInvestments(),
+          getDistributions(),
+          getInvestorHistory(investorId),
+        ]);
+
+        if (!inv) {
+          setNotLinked(true);
+          setLoading(false);
+          return;
+        }
+
+        setInvestor(inv);
+        setInvestments(invs);
+
+        const myDists = dists.filter(d =>
+          d.status === 'approved' &&
+          (d.investorId === investorId || d.details?.some(det => det.investorId === investorId))
+        );
+        setDistributions(myDists);
+        setHistory(hist);
+      } catch (e) {
+        console.error('[InvestorPortal] Error:', e);
+        setNotLinked(true);
+      } finally {
+        setLoading(false);
+      }
     };
+
     load();
   }, [user]);
 
+  // ── Loading ──
   if (loading) return (
-    <div className="flex items-center justify-center h-64">
-      <div className="w-10 h-10 border-4 border-blue-600 border-t-transparent rounded-full animate-spin" />
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '60vh', flexDirection: 'column', gap: 12 }}>
+      <div style={{ width: 40, height: 40, border: '3px solid #e2e8f0', borderTopColor: 'var(--navy)', borderRadius: '50%', animation: 'spin 0.7s linear infinite' }} />
+      <p style={{ color: 'var(--muted)', fontSize: '0.85rem' }}>جاري تحميل بياناتك...</p>
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
     </div>
   );
 
-  if (!investor) return (
-    <div className="text-center py-20 text-slate-500">
-      <User size={48} className="mx-auto mb-4 text-slate-300" />
-      <p>لم يتم ربط حسابك بمستثمر بعد. يرجى التواصل مع المدير.</p>
+  // ── غير مرتبط ──
+  if (notLinked || !investor) return (
+    <div style={{ textAlign: 'center', padding: '4rem 1rem' }}>
+      <div style={{ width: 72, height: 72, borderRadius: '20px', background: '#f1f5f9', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 1rem' }}>
+        <User size={32} color="#94a3b8" />
+      </div>
+      <h2 style={{ fontWeight: 700, color: 'var(--navy)', marginBottom: '0.5rem' }}>لم يتم ربط حسابك بعد</h2>
+      <p style={{ color: 'var(--muted)', fontSize: '0.9rem', maxWidth: 320, margin: '0 auto' }}>
+        حسابك لم يُربط بمستثمر حتى الآن. يرجى التواصل مع المدير لإتمام الربط.
+      </p>
+      <p style={{ color: '#94a3b8', fontSize: '0.75rem', marginTop: '1rem' }}>
+        البريد الإلكتروني: {user?.email}
+      </p>
     </div>
   );
 
+  // ── البيانات ──
   const totalReceived = distributions.reduce((s, d) => {
     if (d.investorId === investor.id) return s + d.totalAmount;
     const det = d.details?.find(det => det.investorId === investor.id);
@@ -62,21 +108,13 @@ export default function InvestorPortalPage() {
 
   const totalReturn = investor.totalPaid > 0 ? (totalReceived / investor.totalPaid) * 100 : 0;
 
-  // Estimated share in each investment by ownership %
   const investmentShares = investments.filter(i => i.status === 'active').map(inv => ({
     ...inv,
     myShare: inv.entryAmount * (investor.ownershipPercentage / 100),
-    myProfit: (inv.receivedProfits || 0) * (investor.ownershipPercentage / 100),
+    myProfit: ((inv as any).receivedProfits || 0) * (investor.ownershipPercentage / 100),
   }));
 
   const totalMyShare = investmentShares.reduce((s, i) => s + i.myShare, 0);
-  const totalMyProfit = investmentShares.reduce((s, i) => s + i.myProfit, 0);
-
-  // Chart data from history
-  const chartData = history.slice(0, 12).reverse().map(h => ({
-    date: formatDate(h.date, 'MM/yy'),
-    value: h.sharesAfter,
-  }));
 
   const handleExportCSV = () => {
     const rows = [
@@ -92,126 +130,143 @@ export default function InvestorPortalPage() {
     const csv = '\uFEFF' + rows.map(r => r.join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); a.href = url; a.download = `كشف-${investor.name}.csv`; a.click();
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `كشف-${investor.name}.csv`;
+    a.click();
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+
       {/* Header */}
       <div className="page-header">
         <div>
           <h1 className="page-title">مرحباً، {investor.name}</h1>
           <p className="text-slate-500 text-sm mt-0.5">بوابة المستثمر الخاصة بك</p>
         </div>
-        <button onClick={handleExportCSV} className="btn-secondary"><Download size={16} />تصدير البيانات</button>
+        <button onClick={handleExportCSV} className="btn-secondary">
+          <Download size={16} />تصدير
+        </button>
       </div>
 
-      {/* Main Info Card */}
-      <div className="bg-gradient-to-l from-blue-700 to-blue-900 rounded-2xl p-6 text-white">
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-6">
-          <div>
-            <div className="flex items-center gap-2 mb-2">
-              <User size={18} className="text-blue-300" />
-              <span className="text-blue-200 text-sm">المستثمر رقم {investor.investorNumber}</span>
-              <span className={`badge mr-2 ${investor.status === 'active' ? 'bg-green-400/20 text-green-200' : 'bg-gray-400/20 text-gray-200'}`}>
-                {investor.status === 'active' ? 'نشط' : 'غير نشط'}
-              </span>
+      {/* البطاقة الرئيسية */}
+      <div style={{ background: 'linear-gradient(135deg, #1e3a5f, #0f1729)', borderRadius: 20, padding: '1.5rem', color: '#fff' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: '0.75rem', opacity: 0.7 }}>
+          <User size={15} />
+          <span style={{ fontSize: '0.8rem' }}>المستثمر رقم {investor.investorNumber}</span>
+          <span style={{ marginRight: 8, background: investor.status === 'active' ? 'rgba(16,185,129,.2)' : 'rgba(148,163,184,.2)', color: investor.status === 'active' ? '#6ee7b7' : '#94a3b8', fontSize: '0.7rem', padding: '2px 8px', borderRadius: 20 }}>
+            {investor.status === 'active' ? 'نشط' : 'غير نشط'}
+          </span>
+        </div>
+        <p style={{ fontSize: '2rem', fontWeight: 900, marginBottom: '0.25rem' }}>{formatCurrency(investor.totalPaid)}</p>
+        <p style={{ fontSize: '0.78rem', opacity: 0.6, marginBottom: '1.25rem' }}>إجمالي رأس المال المدفوع</p>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: '0.75rem', borderTop: '1px solid rgba(255,255,255,.15)', paddingTop: '1rem' }}>
+          {[
+            { label: 'نسبة الملكية', value: formatPercent(investor.ownershipPercentage) },
+            { label: 'عدد الحصص', value: formatNumber(investor.shareCount, 0) },
+            { label: 'تاريخ الانضمام', value: formatDate(investor.joinDate) },
+          ].map(item => (
+            <div key={item.label} style={{ textAlign: 'center' }}>
+              <p style={{ fontSize: '0.65rem', opacity: 0.6, marginBottom: 4 }}>{item.label}</p>
+              <p style={{ fontWeight: 700, fontSize: '1rem' }}>{item.value}</p>
             </div>
-            <p className="text-3xl font-bold">{formatCurrency(investor.totalPaid)}</p>
-            <p className="text-blue-300 text-sm mt-1">إجمالي رأس المال المدفوع</p>
-          </div>
-          <div className="grid grid-cols-3 gap-6">
-            <div className="text-center">
-              <p className="text-blue-300 text-xs mb-1">نسبة الملكية</p>
-              <p className="text-2xl font-bold">{formatPercent(investor.ownershipPercentage)}</p>
-            </div>
-            <div className="text-center">
-              <p className="text-blue-300 text-xs mb-1">عدد الحصص</p>
-              <p className="text-2xl font-bold">{formatNumber(investor.shareCount, 0)}</p>
-            </div>
-            <div className="text-center">
-              <p className="text-blue-300 text-xs mb-1">تاريخ الانضمام</p>
-              <p className="text-lg font-bold">{formatDate(investor.joinDate)}</p>
-            </div>
-          </div>
+          ))}
         </div>
       </div>
 
       {/* KPI Cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 gap-3">
         {[
-          { label: 'إجمالي التوزيعات المستلمة', value: formatCurrency(totalReceived), icon: <DollarSign size={18} />, color: 'green' },
-          { label: 'العائد الإجمالي', value: formatPercent(totalReturn), icon: <TrendingUp size={18} />, color: 'blue' },
-          { label: 'نصيبك من الاستثمارات', value: formatCurrency(totalMyShare), icon: <Layers size={18} />, color: 'purple' },
-          { label: 'نصيبك من الأرباح', value: formatCurrency(totalMyProfit), icon: <BarChart3 size={18} />, color: 'yellow' },
+          { label: 'التوزيعات المستلمة', value: formatCurrency(totalReceived), icon: <DollarSign size={16} />, color: '#059669', bg: '#f0fdf4' },
+          { label: 'العائد الإجمالي', value: formatPercent(totalReturn), icon: <TrendingUp size={16} />, color: '#2563eb', bg: '#eff6ff' },
+          { label: 'نصيبك من الاستثمارات', value: formatCurrency(totalMyShare), icon: <Layers size={16} />, color: '#7c3aed', bg: '#f3e8ff' },
+          { label: 'عدد التوزيعات', value: String(distributions.length), icon: <BarChart3 size={16} />, color: '#d97706', bg: '#fffbeb' },
         ].map(card => (
           <div key={card.label} className="stat-card">
-            <div className={`p-2 rounded-lg w-fit mb-3 ${card.color === 'green' ? 'bg-green-50' : card.color === 'blue' ? 'bg-blue-50' : card.color === 'purple' ? 'bg-purple-50' : 'bg-yellow-50'}`}>
-              <span className={card.color === 'green' ? 'text-green-600' : card.color === 'blue' ? 'text-blue-600' : card.color === 'purple' ? 'text-purple-600' : 'text-yellow-600'}>
-                {card.icon}
-              </span>
+            <div style={{ width: 32, height: 32, borderRadius: 10, background: card.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 8, color: card.color }}>
+              {card.icon}
             </div>
-            <p className="text-lg font-bold text-slate-800">{card.value}</p>
-            <p className="text-xs text-slate-500 mt-0.5">{card.label}</p>
+            <p style={{ fontSize: '1.1rem', fontWeight: 800, color: card.color }}>{card.value}</p>
+            <p style={{ fontSize: '0.72rem', color: 'var(--muted)', marginTop: 2 }}>{card.label}</p>
           </div>
         ))}
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {/* Investment shares */}
-        <div className="card p-6">
-          <h3 className="section-title">نصيبك من الاستثمارات القائمة</h3>
-          {investmentShares.length === 0 ? (
-            <p className="text-slate-400 text-sm text-center py-8">لا توجد استثمارات قائمة</p>
-          ) : (
-            <div className="space-y-3">
-              {investmentShares.map(inv => (
-                <div key={inv.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl">
-                  <div>
-                    <p className="font-medium text-slate-800 text-sm">{inv.name}</p>
-                    <p className="text-xs text-slate-500">{inv.entity}</p>
-                  </div>
-                  <div className="text-left">
-                    <p className="font-semibold text-blue-700 text-sm">{formatCurrency(inv.myShare)}</p>
-                    <p className="text-xs text-green-600">+ {formatCurrency(inv.myProfit)} أرباح</p>
-                  </div>
+      {/* نصيبك من الاستثمارات */}
+      <div className="card" style={{ padding: '1.25rem' }}>
+        <h3 className="section-title">نصيبك من الاستثمارات القائمة</h3>
+        {investmentShares.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--muted)', fontSize: '0.85rem' }}>
+            لا توجد استثمارات قائمة حالياً
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {investmentShares.map(inv => (
+              <div key={inv.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.75rem', background: '#f8fafc', borderRadius: 12 }}>
+                <div>
+                  <p style={{ fontWeight: 600, fontSize: '0.875rem' }}>{inv.name}</p>
+                  <p style={{ fontSize: '0.72rem', color: 'var(--muted)' }}>{inv.entity}</p>
                 </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Distribution history */}
-        <div className="card p-6">
-          <h3 className="section-title">سجل التوزيعات المستلمة</h3>
-          {distributions.length === 0 ? (
-            <p className="text-slate-400 text-sm text-center py-8">لا توجد توزيعات بعد</p>
-          ) : (
-            <div className="space-y-2 max-h-64 overflow-y-auto">
-              {distributions.map(dist => {
-                const myAmount = dist.investorId === investor.id
-                  ? dist.totalAmount
-                  : dist.details?.find(det => det.investorId === investor.id)?.amount || 0;
-                return (
-                  <div key={dist.id} className="flex items-center justify-between py-2 border-b border-slate-100 last:border-0">
-                    <div>
-                      <p className="text-sm font-medium text-slate-700">{formatDate(dist.date)}</p>
-                      <p className="text-xs text-slate-500">{dist.notes || 'توزيع أرباح'}</p>
-                    </div>
-                    <span className="font-bold text-green-700 text-sm">{formatCurrency(myAmount)}</span>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
+                <div style={{ textAlign: 'left' }}>
+                  <p style={{ fontWeight: 700, color: '#2563eb', fontSize: '0.875rem' }}>{formatCurrency(inv.myShare)}</p>
+                  {inv.myProfit > 0 && <p style={{ fontSize: '0.7rem', color: '#059669' }}>+{formatCurrency(inv.myProfit)} أرباح</p>}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
-      {/* Activity history */}
+      {/* سجل التوزيعات */}
+      <div className="card" style={{ padding: '1.25rem' }}>
+        <h3 className="section-title">سجل التوزيعات المستلمة</h3>
+        {distributions.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--muted)', fontSize: '0.85rem' }}>
+            لا توجد توزيعات بعد
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 0, maxHeight: 280, overflowY: 'auto' }}>
+            {distributions.map(dist => {
+              const myAmount = dist.investorId === investor.id
+                ? dist.totalAmount
+                : dist.details?.find(det => det.investorId === investor.id)?.amount || 0;
+              return (
+                <div key={dist.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.625rem 0', borderBottom: '1px solid #f1f5f9' }}>
+                  <div>
+                    <p style={{ fontSize: '0.85rem', fontWeight: 500 }}>{formatDate(dist.date)}</p>
+                    <p style={{ fontSize: '0.72rem', color: 'var(--muted)' }}>{dist.notes || 'توزيع أرباح'}</p>
+                  </div>
+                  <span style={{ fontWeight: 700, color: '#059669', fontSize: '0.875rem' }}>{formatCurrency(myAmount)}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* سجل التغييرات */}
       {history.length > 0 && (
-        <div className="card p-6">
+        <div className="card" style={{ padding: '1.25rem' }}>
           <h3 className="section-title">سجل التغييرات على حسابك</h3>
-          <div className="table-container">
+          {/* Mobile */}
+          <div className="sm:hidden space-y-2">
+            {history.map(h => (
+              <div key={h.id} style={{ background: '#f8fafc', borderRadius: 12, padding: '0.75rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                  <span style={{ fontSize: '0.8rem', fontWeight: 600 }}>{formatDate(h.date)}</span>
+                  <span className="badge-blue" style={{ fontSize: '0.65rem' }}>{h.type}</span>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, fontSize: '0.75rem', color: 'var(--muted)' }}>
+                  <span>حصص: {formatNumber(h.sharesBefore, 0)} ← {formatNumber(h.sharesAfter, 0)}</span>
+                  <span>ملكية: {formatPercent(h.ownershipBefore)} ← {formatPercent(h.ownershipAfter)}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+          {/* Desktop */}
+          <div className="hidden sm:block table-container">
             <table className="table">
               <thead>
                 <tr><th>التاريخ</th><th>نوع العملية</th><th>حصص قبل</th><th>حصص بعد</th><th>ملكية قبل</th><th>ملكية بعد</th></tr>
@@ -219,7 +274,7 @@ export default function InvestorPortalPage() {
               <tbody>
                 {history.map(h => (
                   <tr key={h.id}>
-                    <td className="text-slate-600">{formatDate(h.date)}</td>
+                    <td className="text-slate-600 text-sm">{formatDate(h.date)}</td>
                     <td><span className="badge-blue text-xs">{h.type}</span></td>
                     <td>{formatNumber(h.sharesBefore, 0)}</td>
                     <td>{formatNumber(h.sharesAfter, 0)}</td>
