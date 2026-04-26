@@ -288,24 +288,23 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* روابط سريعة */}
-      <div className="card" style={{ padding: '1.2rem' }}>
-        <h3 className="section-title">الأقسام الرئيسية</h3>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: '0.75rem' }}>
-          <Link href="/investments" className="flex items-center justify-between p-3 bg-slate-50 rounded-xl hover:bg-slate-100 transition">
-            <div><TrendingUp size={18} /><span className="mr-2">الاستثمارات</span></div><ChevronLeft size={16} />
-          </Link>
-          <Link href="/investors" className="flex items-center justify-between p-3 bg-slate-50 rounded-xl hover:bg-slate-100 transition">
-            <div><Users size={18} /><span className="mr-2">المستثمرون</span></div><ChevronLeft size={16} />
-          </Link>
-          <Link href="/expenses" className="flex items-center justify-between p-3 bg-slate-50 rounded-xl hover:bg-slate-100 transition">
-            <div><ArrowDownRight size={18} /><span className="mr-2">المصاريف</span></div><ChevronLeft size={16} />
-          </Link>
-          <Link href="/reports" className="flex items-center justify-between p-3 bg-slate-50 rounded-xl hover:bg-slate-100 transition">
-            <div><BarChart3 size={18} /><span className="mr-2">التقارير</span></div><ChevronLeft size={16} />
-          </Link>
-        </div>
-      </div>
+    {/* روابط سريعة — للمدير فقط */}
+{user?.role !== 'investor' && (
+  <div className="card" style={{ padding: '1.2rem' }}>
+    <h3 className="section-title">الأقسام الرئيسية</h3>
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: '0.75rem' }}>
+      <Link href="/investments" className="flex items-center justify-between p-3 bg-slate-50 rounded-xl hover:bg-slate-100 transition">
+        <div><TrendingUp size={18} /><span className="mr-2">الاستثمارات</span></div><ChevronLeft size={16} />
+      </Link>
+      <Link href="/investors" className="flex items-center justify-between p-3 bg-slate-50 rounded-xl hover:bg-slate-100 transition">
+        <div><Users size={18} /><span className="mr-2">المستثمرون</span></div><ChevronLeft size={16} />
+      </Link>
+      <Link href="/expenses" className="flex items-center justify-between p-3 bg-slate-50 rounded-xl hover:bg-slate-100 transition">
+        <div><ArrowDownRight size={18} /><span className="mr-2">المصاريف</span></div><ChevronLeft size={16} />
+      </Link>
+      <Link href="/reports" className="flex items-center justify-between p-3 bg-slate-50 rounded-xl hover:bg-slate-100 transition">
+        <div><BarChart3 size={18} /><span className="mr-2">التقارير</span></div><ChevronLeft size={16} />
+      </Link>
     </div>
-  );
-}
+  </div>
+)}
