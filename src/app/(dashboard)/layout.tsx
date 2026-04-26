@@ -27,12 +27,16 @@ const navItems: NavItem[] = [
 ];
 
 const mobileBottomNav = [
-  { href: '/dashboard',      icon: <LayoutDashboard size={22} />, label: 'الرئيسية',   roles: ['manager','admin','investor'] },
-  { href: '/investments',    icon: <TrendingUp size={22} />,      label: 'استثمارات',  roles: ['manager','admin'] },
-  { href: '/investors',      icon: <Users size={22} />,           label: 'مستثمرون',   roles: ['manager','admin'] },
-  { href: '/reports',        icon: <BarChart3 size={22} />,       label: 'التقارير',   roles: ['manager','admin'] },
-  { href: '/investor-portal',icon: <FileText size={22} />,        label: 'بوابتي',     roles: ['investor'] },
-  { href: '/settings',       icon: <Settings size={22} />,        label: 'الإعدادات',  roles: ['manager','admin','investor'] },
+  // مدير / إداري
+  { href: '/dashboard',       icon: <LayoutDashboard size={22} />, label: 'الرئيسية',  roles: ['manager','admin'] },
+  { href: '/investments',     icon: <TrendingUp size={22} />,      label: 'استثمارات', roles: ['manager','admin'] },
+  { href: '/investors',       icon: <Users size={22} />,           label: 'مستثمرون',  roles: ['manager','admin'] },
+  { href: '/reports',         icon: <BarChart3 size={22} />,       label: 'التقارير',  roles: ['manager','admin'] },
+  { href: '/settings',        icon: <Settings size={22} />,        label: 'الإعدادات', roles: ['manager','admin'] },
+  // مستثمر فقط
+  { href: '/dashboard',       icon: <LayoutDashboard size={22} />, label: 'الرئيسية',  roles: ['investor'] },
+  { href: '/investor-portal', icon: <FileText size={22} />,        label: 'بوابتي',    roles: ['investor'] },
+  { href: '/settings',        icon: <Settings size={22} />,        label: 'الإعدادات', roles: ['investor'] },
 ];
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
