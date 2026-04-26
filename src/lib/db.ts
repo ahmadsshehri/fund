@@ -205,16 +205,18 @@ export async function updateInvestor(
 }
 
 export async function getInvestorHistory(investorId: string): Promise<InvestorHistory[]> {
+  // ✅ بدون orderBy لتجنب الحاجة لـ Composite Index — نرتب يدوياً
   const snap = await getDocs(query(
     collection(db, 'investorHistory'),
     where('investorId', '==', investorId),
-    orderBy('date', 'desc')
   ));
-  return snap.docs.map(d => ({
+  const results = snap.docs.map(d => ({
     id: d.id, ...d.data(),
     date: toDate(d.data().date),
     createdAt: toDate(d.data().createdAt),
   } as InvestorHistory));
+  // ترتيب تنازلي حسب التاريخ
+  return results.sort((a, b) => b.date.getTime() - a.date.getTime());
 }
 
 // ==================== INVESTMENTS ====================
