@@ -1,10 +1,5 @@
 'use client';
-const { user } = useAuth();
 
-// حماية الصفحة — المستثمر لا يدخل
-if (user && user.role === 'investor') {
-  redirect('/investor-portal');
-}
 export const dynamic = 'force-dynamic';
 
 import { useEffect, useState } from 'react';
