@@ -1,6 +1,6 @@
 'use client';
 
-import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
+import { createContext, useContext, useEffect, useState, useRef, ReactNode } from 'react';
 import {
   signInWithEmailAndPassword,
   signOut as firebaseSignOut,
@@ -27,17 +27,22 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [user, setUser] = useState<User | null>(null);
+  // ✅ loading يبقى true حتى يكتمل جلب Firestore — لا يُغيَّر للـ false قبل ذلك
   const [loading, setLoading] = useState(true);
+  // ✅ منع التعارض بين استدعاءات متزامنة
+  const fetchingRef = useRef(false);
 
   const fetchUserData = async (fbUser: FirebaseUser): Promise<boolean> => {
+    // منع استدعاءات متزامنة
+    if (fetchingRef.current) return false;
+    fetchingRef.current = true;
+
     try {
-      console.log('[Auth] Fetching user doc for uid:', fbUser.uid);
       const ref = doc(db, 'users', fbUser.uid);
       const snap = await getDoc(ref);
 
       if (snap.exists()) {
         const data = snap.data();
-        console.log('[Auth] User doc found:', data);
         setUser({
           id: fbUser.uid,
           name: data.name || '',
@@ -50,48 +55,53 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           createdAt: data.createdAt?.toDate?.() ?? new Date(),
           createdBy: data.createdBy || '',
         });
-        // Update last login silently
-        setDoc(ref, { lastLogin: new Date() }, { merge: true }).catch(console.error);
+        // تحديث lastLogin بشكل صامت
+        setDoc(ref, { lastLogin: new Date() }, { merge: true }).catch(() => {});
         return true;
       } else {
-        console.warn('[Auth] No user doc found in Firestore for uid:', fbUser.uid);
+        console.warn('[Auth] No user doc for uid:', fbUser.uid);
         setUser(null);
         return false;
       }
     } catch (err) {
-      console.error('[Auth] Error fetching user doc:', err);
+      console.error('[Auth] Error fetching user:', err);
       setUser(null);
       return false;
+    } finally {
+      fetchingRef.current = false;
     }
   };
 
   useEffect(() => {
-    console.log('[Auth] Setting up onAuthStateChanged listener');
+    // ✅ الـ listener يُبقي loading=true حتى يكتمل كل شيء
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
-      console.log('[Auth] Auth state changed. fbUser:', fbUser?.uid ?? 'null');
       setFirebaseUser(fbUser);
 
       if (fbUser) {
-        const found = await fetchUserData(fbUser);
-        console.log('[Auth] fetchUserData result:', found);
+        // جلب بيانات المستخدم من Firestore أولاً — ثم نُنهي الـ loading
+        await fetchUserData(fbUser);
       } else {
         setUser(null);
       }
 
-      console.log('[Auth] Setting loading = false');
+      // ✅ loading = false فقط بعد اكتمال كل العمليات
       setLoading(false);
     });
 
-    return () => {
-      console.log('[Auth] Cleaning up listener');
-      unsubscribe();
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => unsubscribe();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const signIn = async (email: string, password: string) => {
-    console.log('[Auth] signIn called for:', email);
-    await signInWithEmailAndPassword(auth, email, password);
+    // ✅ نُعيد loading=true عند تسجيل الدخول لمنع التوجيه المبكر
+    setLoading(true);
+    try {
+      await signInWithEmailAndPassword(auth, email, password);
+      // onAuthStateChanged سيُكمل الباقي ويضع loading=false
+    } catch (err) {
+      setLoading(false);
+      throw err;
+    }
   };
 
   const signOut = async () => {
@@ -108,8 +118,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const refreshUser = async () => {
     if (firebaseUser) await fetchUserData(firebaseUser);
   };
-
-  console.log('[Auth] Render state — loading:', loading, '| user:', user?.email ?? 'null');
 
   return (
     <AuthContext.Provider value={{ firebaseUser, user, loading, signIn, signOut, changePassword, refreshUser }}>
