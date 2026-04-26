@@ -1,7 +1,7 @@
 'use client';
 export const dynamic = 'force-dynamic';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import { Eye, EyeOff, AlertCircle, Building2 } from 'lucide-react';
@@ -11,18 +11,54 @@ export default function LoginPage() {
   const [password, setPassword] = useState('');
   const [showPw, setShowPw] = useState(false);
   const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
-  const { signIn } = useAuth();
+  const [submitting, setSubmitting] = useState(false);
+  const { signIn, user, loading } = useAuth();
   const router = useRouter();
+
+  // ✅ التوجيه يحدث فقط عندما يكون loading=false وuser موجود
+  useEffect(() => {
+    if (!loading && user) {
+      router.replace('/dashboard');
+    }
+  }, [user, loading, router]);
+
+  // ✅ إذا كان loading لا نعرض الصفحة (يمنع الوميض)
+  if (loading) {
+    return (
+      <div style={{
+        minHeight: '100dvh',
+        background: 'linear-gradient(160deg, #0f1729 0%, #1a2540 50%, #0f1729 100%)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+      }}>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{
+            width: 40, height: 40, border: '3px solid rgba(201,168,76,.3)',
+            borderTopColor: '#c9a84c', borderRadius: '50%',
+            margin: '0 auto 12px', animation: 'spin 0.7s linear infinite',
+          }} />
+          <p style={{ color: 'rgba(255,255,255,.5)', fontSize: '0.85rem' }}>جاري التحميل...</p>
+        </div>
+        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      </div>
+    );
+  }
+
+  // ✅ إذا كان المستخدم مسجلاً بالفعل، لا نعرض الصفحة
+  if (user) return null;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError(''); setLoading(true);
+    if (submitting) return;
+    setError('');
+    setSubmitting(true);
     try {
       await signIn(email, password);
-      router.push('/dashboard');
-    } catch { setError('البريد الإلكتروني أو كلمة المرور غير صحيحة'); }
-    finally { setLoading(false); }
+      // ✅ لا نحتاج router.push هنا — useEffect أعلاه سيتولى التوجيه
+      // بعد أن يكتمل onAuthStateChanged ويُعيّن user
+    } catch {
+      setError('البريد الإلكتروني أو كلمة المرور غير صحيحة');
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -32,7 +68,9 @@ export default function LoginPage() {
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       padding: '1.5rem', position: 'relative', overflow: 'hidden',
     }}>
-      {/* Background circles */}
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+
+      {/* خلفية زخرفية */}
       <div style={{ position: 'absolute', top: '-20%', right: '-10%', width: '50vw', height: '50vw', borderRadius: '50%', background: 'rgba(201,168,76,.06)', pointerEvents: 'none' }} />
       <div style={{ position: 'absolute', bottom: '-15%', left: '-5%', width: '40vw', height: '40vw', borderRadius: '50%', background: 'rgba(16,185,129,.05)', pointerEvents: 'none' }} />
 
@@ -72,61 +110,72 @@ export default function LoginPage() {
           )}
 
           <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+            {/* Email */}
             <div>
               <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: 'rgba(255,255,255,.6)', marginBottom: '0.5rem' }}>
                 البريد الإلكتروني
               </label>
               <input
-                type="email" value={email} onChange={e => setEmail(e.target.value)} required
-                placeholder="example@email.com" dir="ltr"
+                type="email" value={email} onChange={e => setEmail(e.target.value)}
+                required placeholder="example@email.com" dir="ltr"
+                disabled={submitting}
                 style={{
                   width: '100%', padding: '0.75rem 1rem', borderRadius: '12px',
                   background: 'rgba(255,255,255,.08)', border: '1.5px solid rgba(255,255,255,.12)',
                   color: '#fff', fontSize: '0.875rem', fontFamily: 'Cairo, inherit',
-                  outline: 'none', transition: 'border-color 0.15s',
+                  outline: 'none', transition: 'border-color 0.15s', boxSizing: 'border-box',
+                  opacity: submitting ? 0.7 : 1,
                 }}
                 onFocus={e => e.target.style.borderColor = 'rgba(201,168,76,.6)'}
                 onBlur={e => e.target.style.borderColor = 'rgba(255,255,255,.12)'}
               />
             </div>
 
+            {/* Password */}
             <div>
               <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: 'rgba(255,255,255,.6)', marginBottom: '0.5rem' }}>
                 كلمة المرور
               </label>
               <div style={{ position: 'relative' }}>
                 <input
-                  type={showPw ? 'text' : 'password'} value={password} onChange={e => setPassword(e.target.value)} required
-                  placeholder="••••••••"
+                  type={showPw ? 'text' : 'password'} value={password}
+                  onChange={e => setPassword(e.target.value)} required
+                  placeholder="••••••••" disabled={submitting}
                   style={{
-                    width: '100%', padding: '0.75rem 1rem', paddingLeft: '2.75rem', borderRadius: '12px',
-                    background: 'rgba(255,255,255,.08)', border: '1.5px solid rgba(255,255,255,.12)',
-                    color: '#fff', fontSize: '0.875rem', fontFamily: 'Cairo, inherit',
-                    outline: 'none', transition: 'border-color 0.15s',
+                    width: '100%', padding: '0.75rem 1rem', paddingLeft: '2.75rem',
+                    borderRadius: '12px', background: 'rgba(255,255,255,.08)',
+                    border: '1.5px solid rgba(255,255,255,.12)', color: '#fff',
+                    fontSize: '0.875rem', fontFamily: 'Cairo, inherit',
+                    outline: 'none', transition: 'border-color 0.15s', boxSizing: 'border-box',
+                    opacity: submitting ? 0.7 : 1,
                   }}
                   onFocus={e => e.target.style.borderColor = 'rgba(201,168,76,.6)'}
                   onBlur={e => e.target.style.borderColor = 'rgba(255,255,255,.12)'}
                 />
-                <button type="button" onClick={() => setShowPw(!showPw)} style={{
-                  position: 'absolute', left: '0.75rem', top: '50%', transform: 'translateY(-50%)',
-                  background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(255,255,255,.4)',
-                  display: 'flex', padding: '4px',
-                }}>
+                <button
+                  type="button" onClick={() => setShowPw(!showPw)}
+                  style={{ position: 'absolute', left: '0.75rem', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(255,255,255,.4)', display: 'flex', padding: '4px' }}>
                   {showPw ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
               </div>
             </div>
 
-            <button type="submit" disabled={loading} style={{
-              marginTop: '0.5rem', width: '100%', padding: '0.875rem',
-              borderRadius: '14px', border: 'none', cursor: loading ? 'not-allowed' : 'pointer',
-              background: loading ? 'rgba(201,168,76,.5)' : 'linear-gradient(135deg, #c9a84c, #e8c97a)',
-              color: '#0f1729', fontSize: '1rem', fontWeight: 800,
-              fontFamily: 'Cairo, inherit', letterSpacing: '0.01em',
-              boxShadow: '0 4px 16px rgba(201,168,76,.4)',
-              transition: 'opacity 0.15s, transform 0.1s',
-            }}>
-              {loading ? (
+            {/* Submit */}
+            <button
+              type="submit" disabled={submitting || !email || !password}
+              style={{
+                marginTop: '0.5rem', width: '100%', padding: '0.875rem',
+                borderRadius: '14px', border: 'none',
+                cursor: (submitting || !email || !password) ? 'not-allowed' : 'pointer',
+                background: (submitting || !email || !password)
+                  ? 'rgba(201,168,76,.5)'
+                  : 'linear-gradient(135deg, #c9a84c, #e8c97a)',
+                color: '#0f1729', fontSize: '1rem', fontWeight: 800,
+                fontFamily: 'Cairo, inherit', letterSpacing: '0.01em',
+                boxShadow: '0 4px 16px rgba(201,168,76,.4)',
+                transition: 'opacity 0.15s, transform 0.1s',
+              }}>
+              {submitting ? (
                 <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
                   <span style={{ width: '18px', height: '18px', border: '2px solid rgba(15,23,41,.3)', borderTopColor: '#0f1729', borderRadius: '50%', display: 'inline-block', animation: 'spin 0.7s linear infinite' }} />
                   جاري الدخول...
