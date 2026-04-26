@@ -5,6 +5,7 @@ export const dynamic = 'force-dynamic';
 import { useEffect, useState } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { getInvestors, createInvestor, updateInvestor } from '@/lib/db';
+import { calcPortfolioSnapshot } from '@/lib/accounting';
 import { formatCurrency, formatNumber, formatPercent, formatDate } from '@/lib/utils';
 import type { Investor, InvestorStatus } from '@/types';
 import {
@@ -42,6 +43,8 @@ export default function InvestorsPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [selectedInvestor, setSelectedInvestor] = useState<Investor | null>(null);
+  const [currentNAV, setCurrentNAV] = useState<number | null>(null);
+  const [navLoading, setNavLoading] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -50,6 +53,24 @@ export default function InvestorsPage() {
     setLoading(false);
   };
   useEffect(() => { load(); }, []);
+
+  // ✅ جلب NAV الحالي عند فتح نموذج الإضافة
+  const loadNAV = async () => {
+    setNavLoading(true);
+    try {
+      const snap = await calcPortfolioSnapshot();
+      const totalShares = investors
+        .filter(i => i.status === 'active' || i.status === 'inactive')
+        .reduce((s, i) => s + i.shareCount, 0);
+      if (totalShares > 0) {
+        const nav = snap.netPortfolioValue / totalShares;
+        setCurrentNAV(nav);
+      } else {
+        setCurrentNAV(null);
+      }
+    } catch (e) { console.error(e); }
+    finally { setNavLoading(false); }
+  };
 
   const filtered = investors.filter(inv => {
     const matchSearch =
@@ -64,7 +85,14 @@ export default function InvestorsPage() {
   const totalShares = investors.reduce((s, i) => s + i.shareCount, 0);
   const activeCount = investors.filter(i => i.status === 'active').length;
 
-  const openNew = () => { setEditingId(null); setForm(EMPTY_FORM); setError(''); setShowModal(true); };
+  const openNew = () => {
+    setEditingId(null);
+    setForm(EMPTY_FORM);
+    setError('');
+    setCurrentNAV(null);
+    setShowModal(true);
+    loadNAV(); // جلب NAV الحالي
+  };
 
   const openEdit = (inv: Investor) => {
     setEditingId(inv.id);
@@ -363,8 +391,38 @@ export default function InvestorsPage() {
                 </div>
                 <div>
                   <label className="label">مبلغ الاستثمار (ريال) *</label>
-                  <input className="input" type="number" value={form.investedAmount} onChange={e => setForm({ ...form, investedAmount: e.target.value })} />
+                  <input className="input" type="number" value={form.investedAmount} onChange={e => {
+                    const amt = e.target.value;
+                    // ✅ حساب الأسهم تلقائياً إذا كان NAV متوفراً
+                    if (currentNAV && currentNAV > 0 && parseFloat(amt) > 0) {
+                      const autoShares = parseFloat(amt) / currentNAV;
+                      setForm({ ...form, investedAmount: amt, shareCount: autoShares.toFixed(4), sharePrice: currentNAV.toFixed(2) });
+                    } else {
+                      setForm({ ...form, investedAmount: amt });
+                    }
+                  }} />
                 </div>
+                {/* ✅ NAV Box */}
+                {!editingId && (
+                  <div className="col-span-2">
+                    <div style={{ background: navLoading ? '#f8fafc' : currentNAV ? '#eff6ff' : '#fafafa', border: `1.5px solid ${currentNAV ? '#bfdbfe' : '#e2e8f0'}`, borderRadius: 12, padding: '0.875rem 1rem' }}>
+                      {navLoading ? (
+                        <p style={{ fontSize: '0.8rem', color: '#94a3b8' }}>جاري حساب NAV...</p>
+                      ) : currentNAV ? (
+                        <div>
+                          <p style={{ fontSize: '0.72rem', color: '#2563eb', fontWeight: 600, marginBottom: 4 }}>💡 سعر الحصة الحالي (NAV)</p>
+                          <p style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1e40af' }}>{formatCurrency(currentNAV)} / حصة</p>
+                          <p style={{ fontSize: '0.7rem', color: '#3b82f6', marginTop: 4 }}>أدخل مبلغ الاستثمار وسيُحسب عدد الحصص تلقائياً</p>
+                        </div>
+                      ) : (
+                        <div>
+                          <p style={{ fontSize: '0.72rem', color: '#94a3b8', fontWeight: 600 }}>💡 أول مستثمر</p>
+                          <p style={{ fontSize: '0.75rem', color: '#64748b', marginTop: 2 }}>حدد سعر الحصة وعددها يدوياً</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
                 <div>
                   <label className="label">عدد الحصص *</label>
                   <input className="input" type="number" value={form.shareCount} onChange={e => setForm({ ...form, shareCount: e.target.value })} />
