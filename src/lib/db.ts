@@ -11,16 +11,12 @@ import {
   orderBy,
   limit,
   serverTimestamp,
-  runTransaction,
   Timestamp,
   writeBatch,
   setDoc,
   type QueryConstraint,
 } from 'firebase/firestore';
-import {
-  createUserWithEmailAndPassword,
-  sendPasswordResetEmail,
-} from 'firebase/auth';
+import { sendPasswordResetEmail } from 'firebase/auth';
 import { db, auth } from '@/lib/firebase';
 import type {
   User, Investor, Investment, Expense, Distribution,
@@ -86,17 +82,44 @@ export async function getUser(id: string): Promise<User | null> {
   } as User;
 }
 
-// ✅ إصلاح createUser: تُنشئ Auth + Firestore doc وتُرجع الـ uid
+// ✅ إنشاء مستخدم عبر Firebase REST API
+// لا يمس جلسة المدير الحالية إطلاقاً
 export async function createUser(
   data: Omit<User, 'id' | 'createdAt' | 'lastLogin'> & { password: string }
 ): Promise<string> {
   const { password, ...userData } = data;
 
-  // إنشاء حساب Firebase Authentication
-  const credential = await createUserWithEmailAndPassword(auth, userData.email, password);
-  const uid = credential.user.uid;
+  const apiKey = process.env.NEXT_PUBLIC_FIREBASE_API_KEY;
+  if (!apiKey) throw new Error('NEXT_PUBLIC_FIREBASE_API_KEY غير موجود في ملف .env');
 
-  // ✅ setDoc (وليس updateDoc) لأن الـ document غير موجود بعد
+  // ① إنشاء حساب Firebase Auth عبر REST API
+  const response = await fetch(
+    `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${apiKey}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: userData.email,
+        password: password,
+        returnSecureToken: false,
+      }),
+    }
+  );
+
+  const result = await response.json();
+
+  if (!response.ok || !result.localId) {
+    const code = result?.error?.message || 'UNKNOWN_ERROR';
+    if (code.includes('EMAIL_EXISTS')) throw new Error('هذا البريد الإلكتروني مستخدم بالفعل');
+    if (code.includes('WEAK_PASSWORD')) throw new Error('كلمة المرور ضعيفة — 6 أحرف على الأقل');
+    if (code.includes('INVALID_EMAIL')) throw new Error('البريد الإلكتروني غير صالح');
+    if (code.includes('TOO_MANY_ATTEMPTS')) throw new Error('محاولات كثيرة — حاول لاحقاً');
+    throw new Error(`فشل إنشاء الحساب: ${code}`);
+  }
+
+  const uid: string = result.localId;
+
+  // ② حفظ بيانات المستخدم في Firestore
   await setDoc(doc(db, 'users', uid), {
     ...userData,
     createdAt: serverTimestamp(),
@@ -488,7 +511,6 @@ export async function getDashboardStats(): Promise<DashboardStats> {
   for (const inv of distressedInv) {
     alerts.push({ type: 'danger' as const, message: `استثمار متعثر: ${inv.name}`, entityId: inv.id, entityType: 'investment' });
   }
-
   const today = new Date();
   const soon = new Date(today.getTime() + 30 * 86400000);
   for (const inv of activeInv) {
@@ -496,7 +518,6 @@ export async function getDashboardStats(): Promise<DashboardStats> {
       alerts.push({ type: 'warning' as const, message: `استثمار يقترب موعد إغلاقه: ${inv.name}`, entityId: inv.id, entityType: 'investment' });
     }
   }
-
   const investorsWithoutAccounts = investors.filter(i => !i.userId).length;
   if (investorsWithoutAccounts > 0) {
     alerts.push({ type: 'info' as const, message: `${investorsWithoutAccounts} مستثمر بدون حساب دخول` });
