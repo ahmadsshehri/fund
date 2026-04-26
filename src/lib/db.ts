@@ -169,6 +169,29 @@ export async function getInvestor(id: string): Promise<Investor | null> {
   return mapInvestor({ id: snap.id, data: () => snap.data() });
 }
 
+// ✅ دالة مساعدة: إعادة حساب نسب الملكية لجميع المستثمرين النشطين
+async function recalcAllOwnership(): Promise<void> {
+  const snap = await getDocs(collection(db, 'investors'));
+  const allInvestors = snap.docs.map(d => ({ id: d.id, ...d.data() })) as (Investor & { id: string })[];
+  
+  // إجمالي الحصص لجميع المستثمرين النشطين
+  const totalShares = allInvestors
+    .filter(i => i.status === 'active' || i.status === 'inactive')
+    .reduce((s, i) => s + (i.shareCount || 0), 0);
+
+  if (totalShares === 0) return;
+
+  const batch = writeBatch(db);
+  for (const inv of allInvestors) {
+    const ownership = totalShares > 0 ? ((inv.shareCount || 0) / totalShares) * 100 : 0;
+    batch.update(doc(db, 'investors', inv.id), {
+      ownershipPercentage: ownership,
+      updatedAt: serverTimestamp(),
+    });
+  }
+  await batch.commit();
+}
+
 export async function createInvestor(
   data: Omit<Investor, 'id' | 'createdAt' | 'updatedAt'>,
   creatorName: string
@@ -178,6 +201,10 @@ export async function createInvestor(
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
+
+  // ✅ إعادة حساب نسب الملكية لجميع المستثمرين بعد الإضافة
+  await recalcAllOwnership();
+
   await addCashFlow({
     type: 'capital_in',
     date: data.joinDate,
@@ -201,6 +228,12 @@ export async function updateInvestor(
     ...serializeForFirestore(data as Record<string, unknown>),
     updatedAt: serverTimestamp(),
   });
+
+  // ✅ إذا تغيرت الحصص، أعد حساب نسب الملكية الكلية
+  if (data.shareCount !== undefined) {
+    await recalcAllOwnership();
+  }
+
   await logActivity(userId, userName, 'update', 'investor', id, data as Record<string, unknown>);
 }
 
