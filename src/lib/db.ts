@@ -119,9 +119,15 @@ export async function createUser(
 
   const uid: string = result.localId;
 
+  // ✅ حذف أي حقل undefined قبل الحفظ — Firestore لا يقبلها
+  const cleanData: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(userData)) {
+    if (value !== undefined) cleanData[key] = value;
+  }
+
   // ② حفظ بيانات المستخدم في Firestore
   await setDoc(doc(db, 'users', uid), {
-    ...userData,
+    ...cleanData,
     createdAt: serverTimestamp(),
     lastLogin: null,
   });
